@@ -1,0 +1,6 @@
+{
+  "name": "Tryškių Lazdynų Pelėdos gimnazijos inventorius",
+  "description": "Telšių raj. Tryškių Lazdynų Pelėdos gimnazijos inventoriaus ir materialinių vertybių apskaitos sistema su skyriais, vaidmenimis, ataskaitomis ir Brother spausdintuvo palaikymu.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

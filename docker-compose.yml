@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  mokyklos-inventorius:
+    build: .
+    container_name: mokykla-inventorius
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    volumes:
+      # Duomenų bazės / atsarginių kopijų saugykla Proxmox serveryje
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

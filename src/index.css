@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Public Sans', system-ui, -apple-system, sans-serif;
+    background-color: #f1f5f9; /* Rich slate-100 background to give white cards crisp contrast */
+    color: #0f172a; /* slate-900 */
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    color: #0f172a;
+  }
+
+  /* Enhanced contrast for form inputs and selects */
+  input[type="text"],
+  input[type="search"],
+  input[type="number"],
+  input[type="date"],
+  input[type="password"],
+  input[type="email"],
+  select,
+  textarea {
+    border-color: #cbd5e1; /* slate-300: clearly visible border */
+    background-color: #ffffff;
+    color: #0f172a;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+  }
+
+  input[type="text"]:focus,
+  input[type="search"]:focus,
+  input[type="number"]:focus,
+  input[type="date"]:focus,
+  input[type="password"]:focus,
+  input[type="email"]:focus,
+  select:focus,
+  textarea:focus {
+    border-color: #2563eb !important; /* blue-600 */
+    outline: none !important;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2) !important;
+    background-color: #ffffff !important;
+  }
+
+  /* Form labels contrast */
+  label {
+    color: #334155; /* slate-700 */
+    font-weight: 600;
+  }
+}
+
+/* Card & container contrast enhancements */
+.bg-white {
+  background-color: #ffffff;
+}
+
+/* Scrollbars with high visibility */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Print-specific layout for official acts and lists */
+@media print {
+  body {
+    background: white !important;
+    color: black !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  .print-sheet {
+    box-shadow: none !important;
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+  }
+  @page {
+    size: A4;
+    margin: 15mm;
+  }
+}
