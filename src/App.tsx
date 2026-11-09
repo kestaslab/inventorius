@@ -16,6 +16,7 @@ import { TransferModal } from './components/TransferModal';
 import { WriteOffModal } from './components/WriteOffModal';
 import { UserModal } from './components/UserModal';
 import { LoginModal } from './components/LoginModal';
+import { LoginPortalView } from './components/LoginPortalView';
 import { AccessDeniedView } from './components/AccessDeniedView';
 
 import { 
@@ -39,7 +40,7 @@ export default function App() {
   const [movements, setMovements] = useState<MovementRecord[]>(() => StorageService.getMovements());
   const [writeOffActs, setWriteOffActs] = useState<WriteOffAct[]>(() => StorageService.getWriteOffActs());
   const [auditSessions, setAuditSessions] = useState<AuditSession[]>(() => StorageService.getAuditSessions());
-  const [activeUserId, setActiveUserId] = useState<string>(() => StorageService.getActiveUserId());
+  const [activeUserId, setActiveUserId] = useState<string | null>(() => StorageService.getActiveUserId());
   const [authSettings, setAuthSettings] = useState<AuthSettings>(() => StorageService.getAuthSettings());
 
   // Cloudflare Access Gatekeeper State (Access Denied for students / unlisted users)
@@ -81,13 +82,22 @@ export default function App() {
     setAuthSettings(StorageService.getAuthSettings());
   }, []);
 
-  const currentUser = users.find(u => u.id === activeUserId) || users[0];
+  const currentUser = users.find(u => u.id === activeUserId) || null;
   const activeAuditSession = auditSessions[0];
 
   // Active user switcher
   const handleChangeUser = (userId: string) => {
     setActiveUserId(userId);
     StorageService.setActiveUserId(userId);
+  };
+
+  const handleLogout = () => {
+    setActiveUserId(null);
+    StorageService.clearActiveUserId();
+    sessionStorage.removeItem('cf_simulated_email');
+    if (window.location.search) {
+      window.history.replaceState({}, '', window.location.pathname);
+    }
   };
 
   // User Management Handlers
@@ -491,8 +501,7 @@ export default function App() {
           sessionStorage.removeItem('cf_simulated_email');
           setDeniedAccessEmail(null);
           if (adminUser) {
-            setActiveUserId(adminUser.id);
-            StorageService.setActiveUserId(adminUser.id);
+            handleLoginSuccess(adminUser);
           }
         }}
         onRetryDifferentEmail={() => {
@@ -501,7 +510,22 @@ export default function App() {
             window.history.replaceState({}, '', window.location.pathname);
           }
           setDeniedAccessEmail(null);
-          setIsLoginModalOpen(true);
+        }}
+      />
+    );
+  }
+
+  // Mandatory Login Screen for unauthenticated visitors / initial visit
+  if (!currentUser) {
+    return (
+      <LoginPortalView
+        users={users}
+        authSettings={authSettings}
+        onLoginSuccess={(user) => {
+          handleLoginSuccess(user);
+        }}
+        onAccessDenied={(email) => {
+          setDeniedAccessEmail(email);
         }}
       />
     );
@@ -518,6 +542,7 @@ export default function App() {
         onChangeUser={handleChangeUser}
         itemsCount={items.length}
         onOpenLoginModal={() => setIsLoginModalOpen(true)}
+        onLogout={handleLogout}
       />
 
       {/* Main Content Area */}
@@ -532,6 +557,7 @@ export default function App() {
           }}
           onExportCSV={handleExportCSV}
           onOpenLoginModal={() => setIsLoginModalOpen(true)}
+          onLogout={handleLogout}
         />
 
         {/* View Content Viewport */}

@@ -233,12 +233,16 @@ export const StorageService = {
     localStorage.setItem(STORAGE_KEYS.AUDIT_SESSIONS, JSON.stringify(sessions));
   },
 
-  getActiveUserId(): string {
-    return localStorage.getItem(STORAGE_KEYS.ACTIVE_USER_ID) || 'usr-1';
+  getActiveUserId(): string | null {
+    return localStorage.getItem(STORAGE_KEYS.ACTIVE_USER_ID);
   },
 
   setActiveUserId(id: string) {
     localStorage.setItem(STORAGE_KEYS.ACTIVE_USER_ID, id);
+  },
+
+  clearActiveUserId() {
+    localStorage.removeItem(STORAGE_KEYS.ACTIVE_USER_ID);
   },
 
   getAuthSettings(): AuthSettings {

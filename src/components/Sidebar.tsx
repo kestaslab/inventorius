@@ -10,7 +10,8 @@ import {
   ShieldCheck,
   School,
   Users,
-  LogIn
+  LogIn,
+  LogOut
 } from 'lucide-react';
 import { User } from '../types/inventory';
 
@@ -33,6 +34,7 @@ interface SidebarProps {
   onChangeUser: (userId: string) => void;
   itemsCount: number;
   onOpenLoginModal: () => void;
+  onLogout: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -43,6 +45,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onChangeUser,
   itemsCount,
   onOpenLoginModal,
+  onLogout,
 }) => {
   const isPrivileged = currentUser.role === 'admin' || currentUser.role === 'manager';
 
@@ -124,38 +127,29 @@ export const Sidebar: React.FC<SidebarProps> = ({
         })}
       </nav>
 
-      {/* Role / User Profile & Auth Switcher */}
+      {/* Logged in User Profile & Logout */}
       <div className="p-3 border-t border-slate-800 bg-slate-950/70 space-y-2.5">
-        <div className="flex items-center justify-between px-1">
-          <div className="flex items-center gap-1.5 text-[11px] text-slate-300">
-            <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-            <span className="font-semibold truncate max-w-[120px]">{currentUser.fullName}</span>
+        <div className="bg-slate-900 border border-slate-800 rounded-lg p-2.5 space-y-1">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-xs text-slate-200">
+              <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+              <span className="font-bold truncate max-w-[130px]">{currentUser.fullName}</span>
+            </div>
+            <span className="text-[9px] font-mono uppercase bg-slate-800 text-blue-300 px-1.5 py-0.5 rounded font-semibold">
+              {currentUser.role}
+            </span>
           </div>
-          <span className="text-[9px] font-mono uppercase bg-slate-800 text-blue-300 px-1.5 py-0.5 rounded font-semibold">
-            {currentUser.role}
-          </span>
+          <div className="text-[11px] text-slate-400 truncate">{currentUser.roleTitle}</div>
         </div>
-
-        <select
-          value={currentUser.id}
-          onChange={(e) => onChangeUser(e.target.value)}
-          title="Greitas darbuotojų perjungimas (testavimui)"
-          className="w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-md px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
-        >
-          {allUsers.map((user) => (
-            <option key={user.id} value={user.id}>
-              {user.fullName} ({user.roleTitle})
-            </option>
-          ))}
-        </select>
 
         <button
           type="button"
-          onClick={onOpenLoginModal}
-          className="w-full py-1.5 px-2.5 bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 hover:text-white border border-blue-500/30 rounded-md text-[11px] font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+          onClick={onLogout}
+          title="Atsijungti iš šios paskyros"
+          className="w-full py-2 px-2.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 hover:text-rose-200 border border-rose-500/25 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
         >
-          <LogIn className="w-3.5 h-3.5" />
-          <span>Prisijungti / Gmail patikra</span>
+          <LogOut className="w-3.5 h-3.5" />
+          <span>Atsijungti</span>
         </button>
 
         <div className="pt-1 px-1 text-[10px] text-slate-400 flex items-center justify-between border-t border-slate-800/80">

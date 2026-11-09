@@ -1,5 +1,4 @@
-import React from 'react';
-import { Plus, Download } from 'lucide-react';
+import { Plus, Download, LogOut } from 'lucide-react';
 import { User } from '../types/inventory';
 import { NavigationTab } from './Sidebar';
 
@@ -9,6 +8,7 @@ interface HeaderProps {
   onOpenAddItem: () => void;
   onExportCSV: () => void;
   onOpenLoginModal: () => void;
+  onLogout?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -17,6 +17,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenAddItem,
   onExportCSV,
   onOpenLoginModal,
+  onLogout,
 }) => {
   const getTabTitle = (tab: NavigationTab): { title: string; subtitle: string } => {
     switch (tab) {
@@ -85,6 +86,17 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Plus className="w-4 h-4 text-white" />
             <span>Registruoti turtą</span>
+          </button>
+        )}
+
+        {onLogout && (
+          <button
+            onClick={onLogout}
+            title={`Atsijungti iš ${currentUser.fullName} paskyros`}
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg hover:bg-rose-100 transition-all whitespace-nowrap cursor-pointer shadow-2xs"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Atsijungti</span>
           </button>
         )}
       </div>
