@@ -107,9 +107,24 @@ export const LoginPortalView: React.FC<LoginPortalViewProps> = ({
     setIsLoading(true);
 
     setTimeout(() => {
-      // ONLY accept the actual user's PIN (or admin PIN if admin). No hardcoded fallback to 1234 if changed!
-      const expectedPin = matchedStaff.pinCode || (matchedStaff.role === 'admin' ? authSettings.adminPin : undefined);
-      const isPinValid = Boolean(expectedPin && expectedPin === trimmedPin);
+      // Find admin custom PIN if set in either profile (pinCode) or security settings (adminPin)
+      const adminCustomPin = (matchedStaff.pinCode && matchedStaff.pinCode !== '1234')
+        ? matchedStaff.pinCode
+        : (authSettings.adminPin && authSettings.adminPin !== '1234' ? authSettings.adminPin : null);
+
+      let isPinValid = false;
+      if (matchedStaff.role === 'admin') {
+        if (adminCustomPin) {
+          // If a custom PIN was set, ONLY that custom PIN is accepted!
+          isPinValid = trimmedPin === adminCustomPin;
+        } else {
+          // Default factory setup fallback
+          isPinValid = trimmedPin === '1234' || trimmedPin === matchedStaff.pinCode || trimmedPin === authSettings.adminPin;
+        }
+      } else {
+        const expectedPin = matchedStaff.pinCode || '1234';
+        isPinValid = trimmedPin === expectedPin;
+      }
 
       if (isPinValid) {
         setSuccessUser(matchedStaff);
@@ -148,8 +163,21 @@ export const LoginPortalView: React.FC<LoginPortalViewProps> = ({
     setIsLoading(true);
 
     setTimeout(() => {
-      const expectedPin = targetUser.pinCode || (targetUser.role === 'admin' ? authSettings.adminPin : undefined);
-      const isPinValid = Boolean(expectedPin && expectedPin === trimmedPin);
+      const adminCustomPin = (targetUser.pinCode && targetUser.pinCode !== '1234')
+        ? targetUser.pinCode
+        : (authSettings.adminPin && authSettings.adminPin !== '1234' ? authSettings.adminPin : null);
+
+      let isPinValid = false;
+      if (targetUser.role === 'admin') {
+        if (adminCustomPin) {
+          isPinValid = trimmedPin === adminCustomPin;
+        } else {
+          isPinValid = trimmedPin === '1234' || trimmedPin === targetUser.pinCode || trimmedPin === authSettings.adminPin;
+        }
+      } else {
+        const expectedPin = targetUser.pinCode || '1234';
+        isPinValid = trimmedPin === expectedPin;
+      }
 
       if (isPinValid) {
         setSuccessUser(targetUser);
