@@ -154,21 +154,18 @@ export default function App() {
   useEffect(() => {
     const adminUser = users.find(u => u.role === 'admin');
     if (adminUser) {
-      const customPin = (adminUser.pinCode && adminUser.pinCode !== '1234')
-        ? adminUser.pinCode
-        : (authSettings.adminPin && authSettings.adminPin !== '1234' ? authSettings.adminPin : null);
-
-      if (customPin) {
+      const activePin = adminUser.pinCode || authSettings.adminPin;
+      if (activePin) {
         let changed = false;
         let newUsers = users;
         let newAuth = authSettings;
 
-        if (adminUser.pinCode !== customPin) {
-          newUsers = users.map(u => u.id === adminUser.id ? { ...u, pinCode: customPin } : u);
+        if (adminUser.pinCode !== activePin) {
+          newUsers = users.map(u => u.id === adminUser.id ? { ...u, pinCode: activePin } : u);
           changed = true;
         }
-        if (authSettings.adminPin !== customPin) {
-          newAuth = { ...authSettings, adminPin: customPin };
+        if (authSettings.adminPin !== activePin) {
+          newAuth = { ...authSettings, adminPin: activePin };
           changed = true;
         }
 

@@ -60,21 +60,11 @@ export const LoginPortalView: React.FC<LoginPortalViewProps> = ({
 
     setTimeout(() => {
       // Find expected PIN
-      const adminCustomPin = (selectedUser.pinCode && selectedUser.pinCode !== '1234')
-        ? selectedUser.pinCode
-        : (authSettings.adminPin && authSettings.adminPin !== '1234' ? authSettings.adminPin : null);
+      const expectedPin = selectedUser.role === 'admin'
+        ? (selectedUser.pinCode || authSettings.adminPin || '1234')
+        : (selectedUser.pinCode || '1234');
 
-      let isPinValid = false;
-      if (selectedUser.role === 'admin') {
-        if (adminCustomPin) {
-          isPinValid = trimmedPin === adminCustomPin;
-        } else {
-          isPinValid = trimmedPin === '1234' || trimmedPin === selectedUser.pinCode || trimmedPin === authSettings.adminPin;
-        }
-      } else {
-        const expectedPin = selectedUser.pinCode || '1234';
-        isPinValid = trimmedPin === expectedPin;
-      }
+      const isPinValid = trimmedPin === expectedPin;
 
       if (isPinValid) {
         setSuccessUser(selectedUser);

@@ -109,17 +109,6 @@ export const StorageService = {
       localStorage.setItem(STORAGE_KEYS.ITEMS, JSON.stringify(INITIAL_ITEMS));
       return INITIAL_ITEMS;
     }
-    // Merge new initial items if not present yet in user storage
-    const existingIds = new Set(items.map(i => i.id));
-    const missingInitial = INITIAL_ITEMS.filter(init => !existingIds.has(init.id));
-    if (missingInitial.length > 0) {
-      items = [...items, ...missingInitial];
-      try {
-        localStorage.setItem(STORAGE_KEYS.ITEMS, JSON.stringify(items));
-      } catch (e) {
-        console.warn('Could not persist updated items cache', e);
-      }
-    }
 
     // Backward compatibility & migration:
     // 1. Rename category 'IT įranga' -> 'Kompiuteriai' (if computer) or 'Kita IT įranga'
@@ -198,16 +187,6 @@ export const StorageService = {
     } else {
       localStorage.setItem(STORAGE_KEYS.WRITEOFFS, JSON.stringify(INITIAL_WRITEOFF_ACTS));
       return INITIAL_WRITEOFF_ACTS;
-    }
-    const existingIds = new Set(acts.map(a => a.id));
-    const missing = INITIAL_WRITEOFF_ACTS.filter(a => !existingIds.has(a.id));
-    if (missing.length > 0) {
-      acts = [...acts, ...missing];
-      try {
-        localStorage.setItem(STORAGE_KEYS.WRITEOFFS, JSON.stringify(acts));
-      } catch (e) {
-        console.warn('Could not persist updated writeoff acts', e);
-      }
     }
     return acts;
   },
