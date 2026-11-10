@@ -109,14 +109,11 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       return;
     }
 
-    // Check PIN: matches user's pinCode OR matches master adminPin
+    // Check PIN: strictly matches user's pinCode (or admin pin if admin)
     const trimmedPin = pinInput.trim();
-    if (user.pinCode && user.pinCode === trimmedPin) {
-      // Valid!
-    } else if (authSettings.adminPin && authSettings.adminPin === trimmedPin) {
-      // Master admin PIN allowed
-    } else {
-      setErrorMessage('Neteisingas PIN kodas. Numatytasis administratoriaus PIN: 1234');
+    const expectedPin = user.pinCode || (user.role === 'admin' ? authSettings.adminPin : undefined);
+    if (!expectedPin || expectedPin !== trimmedPin) {
+      setErrorMessage('Neteisingas PIN kodas. Bandykite dar kartą.');
       return;
     }
 
@@ -322,9 +319,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center justify-between">
-                <span>PIN kodas</span>
-                <span className="text-[10px] text-slate-400 font-normal">Numatytasis admin: 1234</span>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                PIN kodas
               </label>
               <div className="relative">
                 <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />

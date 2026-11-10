@@ -111,6 +111,13 @@ export default function App() {
     }
     setUsers(updatedUsers);
     StorageService.saveUsers(updatedUsers);
+
+    // If admin PIN was changed, also keep authSettings.adminPin strictly synchronized
+    if (userToSave.role === 'admin' && userToSave.pinCode) {
+      const updatedAuth = { ...authSettings, adminPin: userToSave.pinCode };
+      setAuthSettings(updatedAuth);
+      StorageService.saveAuthSettings(updatedAuth);
+    }
   };
 
   const handleDeleteUser = (userId: string) => {
@@ -122,6 +129,15 @@ export default function App() {
   const handleUpdateAuthSettings = (newSettings: AuthSettings) => {
     setAuthSettings(newSettings);
     StorageService.saveAuthSettings(newSettings);
+
+    // Also sync admin user's pinCode
+    if (newSettings.adminPin) {
+      const updatedUsers = users.map(u => 
+        u.role === 'admin' ? { ...u, pinCode: newSettings.adminPin } : u
+      );
+      setUsers(updatedUsers);
+      StorageService.saveUsers(updatedUsers);
+    }
   };
 
   const handleLoginSuccess = (user: User) => {

@@ -107,17 +107,18 @@ export const LoginPortalView: React.FC<LoginPortalViewProps> = ({
     setIsLoading(true);
 
     setTimeout(() => {
-      const isUserPinValid = matchedStaff.pinCode && matchedStaff.pinCode === trimmedPin;
-      const isAdminMasterPinValid = authSettings.adminPin && authSettings.adminPin === trimmedPin;
+      // ONLY accept the actual user's PIN (or admin PIN if admin). No hardcoded fallback to 1234 if changed!
+      const expectedPin = matchedStaff.pinCode || (matchedStaff.role === 'admin' ? authSettings.adminPin : undefined);
+      const isPinValid = Boolean(expectedPin && expectedPin === trimmedPin);
 
-      if (isUserPinValid || isAdminMasterPinValid) {
+      if (isPinValid) {
         setSuccessUser(matchedStaff);
         setTimeout(() => {
           onLoginSuccess(matchedStaff);
         }, 500);
       } else {
         setIsLoading(false);
-        setStaffPinError('Neteisingas PIN kodas. Numatytasis administratoriaus PIN: 1234. Jei pamiršote, kreipkitės į administratorių.');
+        setStaffPinError('Neteisingas PIN kodas. Patikrinkite ir bandykite dar kartą.');
       }
     }, 300);
   };
@@ -147,10 +148,10 @@ export const LoginPortalView: React.FC<LoginPortalViewProps> = ({
     setIsLoading(true);
 
     setTimeout(() => {
-      const isUserPinValid = targetUser.pinCode && targetUser.pinCode === trimmedPin;
-      const isAdminMasterPinValid = authSettings.adminPin && authSettings.adminPin === trimmedPin;
+      const expectedPin = targetUser.pinCode || (targetUser.role === 'admin' ? authSettings.adminPin : undefined);
+      const isPinValid = Boolean(expectedPin && expectedPin === trimmedPin);
 
-      if (isUserPinValid || isAdminMasterPinValid) {
+      if (isPinValid) {
         setSuccessUser(targetUser);
         setTimeout(() => {
           onLoginSuccess(targetUser);
@@ -354,7 +355,7 @@ export const LoginPortalView: React.FC<LoginPortalViewProps> = ({
                           />
                         </div>
                         <p className="text-[11px] text-slate-500 mt-1">
-                          Numatytasis administratoriaus PIN: <strong className="text-slate-700 font-mono">1234</strong>
+                          Įveskite savo konfidencialų asmeninį PIN kodą.
                         </p>
                       </div>
 

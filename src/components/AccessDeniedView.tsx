@@ -25,7 +25,8 @@ export const AccessDeniedView: React.FC<AccessDeniedViewProps> = ({
     e.preventDefault();
     setPinError(null);
     const trimmed = pin.trim();
-    if (trimmed === authSettings.adminPin || (adminUser?.pinCode && trimmed === adminUser.pinCode)) {
+    const expectedAdminPin = adminUser?.pinCode || authSettings.adminPin;
+    if (expectedAdminPin && trimmed === expectedAdminPin) {
       onAdminPinSuccess();
     } else {
       setPinError('Neteisingas administratoriaus PIN kodas.');
