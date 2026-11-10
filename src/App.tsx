@@ -750,12 +750,14 @@ export default function App() {
                   setIsUserModalOpen(true);
                 }}
                 onBatchImportUsers={handleBatchImportUsers}
-                onSimulateCloudflareLogin={handleSimulateCloudflareLogin}
               />
             )}
 
             {currentTab === 'selfhost' && (
-              <SelfHostView onRefreshData={refreshFromStorage} />
+              <SelfHostView 
+                currentUser={currentUser}
+                onRefreshData={refreshFromStorage} 
+              />
             )}
           </div>
         </main>

@@ -38,7 +38,9 @@ export const Header: React.FC<HeaderProps> = ({
       case 'users':
         return { title: 'Naudotojai ir prieigos teisės', subtitle: 'Paskyrų valdymas, Gmail baltojo sąrašo nustatymai ir rolės' };
       case 'selfhost':
-        return { title: 'Savarankiškas diegimas (Proxmox / Docker)', subtitle: 'Konteinerio nustatymai, atsarginės kopijos ir duomenų bazė' };
+        return currentUser.role === 'admin'
+          ? { title: 'Proxmox VE serveris ir atsarginės kopijos', subtitle: 'Konteinerio priežiūra, terminalo komandos ir pilnas duomenų eksportas' }
+          : { title: 'Inventoriaus atsarginės kopijos', subtitle: 'Mokyklos duomenų bazės eksportas ir saugus archyvavimas JSON formatu' };
     }
   };
 

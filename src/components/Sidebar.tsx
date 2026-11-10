@@ -7,6 +7,7 @@ import {
   QrCode, 
   FileText, 
   Server, 
+  Database,
   ShieldCheck,
   School,
   Users,
@@ -58,7 +59,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'labels', label: 'QR kodai ir etiketės', icon: QrCode },
     { id: 'reports', label: 'Ataskaitos ir aktai', icon: FileText },
     { id: 'users', label: 'Vartotojai ir teisės', icon: Users, badge: allUsers.length },
-    { id: 'selfhost', label: 'Proxmox & Saugykla', icon: Server },
+    { 
+      id: 'selfhost', 
+      label: currentUser.role === 'admin' ? 'Proxmox & Saugykla' : 'Atsarginės kopijos', 
+      icon: currentUser.role === 'admin' ? Server : Database 
+    },
   ];
 
   const navItems = allNavItems.filter((item) => {

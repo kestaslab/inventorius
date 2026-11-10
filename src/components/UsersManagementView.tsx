@@ -40,7 +40,6 @@ interface UsersManagementViewProps {
   onOpenCreateUser: () => void;
   onOpenEditUser: (user: User) => void;
   onBatchImportUsers?: (users: User[]) => void;
-  onSimulateCloudflareLogin?: (email: string) => void;
 }
 
 export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
@@ -56,7 +55,6 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
   onOpenCreateUser,
   onOpenEditUser,
   onBatchImportUsers,
-  onSimulateCloudflareLogin,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [roleFilter, setRoleFilter] = useState<'all' | UserRole>('all');
@@ -67,10 +65,6 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
   const [importError, setImportError] = useState<string | null>(null);
   const [importSuccessMsg, setImportSuccessMsg] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // Cloudflare Access Simulator state
-  const [simEmail, setSimEmail] = useState('jonas.mokinys@tryskiumokykla.lt');
-  const [simResult, setSimResult] = useState<{ allowed: boolean; matchedUser?: User; message: string } | null>(null);
 
   // In-app Delete Confirmation Modal state (prevents iframe alert/confirm issues)
   const [userToDelete, setUserToDelete] = useState<User | null>(null);
@@ -223,39 +217,6 @@ Tomas Daukantas;tomas.d@tryskiumokykla.lt;Fizinio ugdymo mokytojas;teacher;S-01`
     }, 1200);
   };
 
-  // Test Cloudflare Access Simulation
-  const handleRunSimulation = (emailToTest: string) => {
-    const q = emailToTest.trim().toLowerCase();
-    if (!q) return;
-
-    const matched = users.find(
-      (u) =>
-        u.email.toLowerCase() === q ||
-        (u.allowedGmail && u.allowedGmail.toLowerCase() === q)
-    );
-
-    if (matched && matched.isActive !== false) {
-      const room = rooms.find((r) => r.id === matched.assignedRoomId);
-      setSimResult({
-        allowed: true,
-        matchedUser: matched,
-        message: `✅ Prieiga SUTEIKTA: ${matched.fullName} (${matched.roleTitle}${
-          room ? `, ${room.number} kab.` : ''
-        }). Darbuotojas bus prijungtas automatiškai be jokio slaptažodžio.`,
-      });
-    } else if (matched && matched.isActive === false) {
-      setSimResult({
-        allowed: false,
-        message: `🚫 Prieiga BLOKUOJAMA: Naudotojo „${matched.fullName}“ paskyra yra deaktyvuota administratoriaus.`,
-      });
-    } else {
-      setSimResult({
-        allowed: false,
-        message: `🚫 Prieiga BLOKUOJAMA (Mokinys ar neįgaliotas asmuo): El. paštas „${q}“ nėra įtrauktas į patvirtintą darbuotojų registrą. Bus parodytas prieigos apribojimo ekranas.`,
-      });
-    }
-  };
-
   const getRoleBadge = (role: UserRole) => {
     switch (role) {
       case 'admin':
@@ -353,148 +314,6 @@ Tomas Daukantas;tomas.d@tryskiumokykla.lt;Fizinio ugdymo mokytojas;teacher;S-01`
               {users.filter(u => u.isActive !== false).length}
             </span>
             <span className="text-[10px] text-slate-400">Iš viso registruota: {users.length}</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Cloudflare Access & Student Gatekeeping Simulator Card */}
-      <div className="bg-slate-900 border border-slate-700 rounded-xl p-5 text-white shadow-xl space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-blue-600/30 border border-blue-500/40 flex items-center justify-center text-blue-400">
-              <ShieldCheck className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white">
-                  Cloudflare Access tunelio integracija ir mokinių filtravimas
-                </h2>
-                <span className="text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-mono px-2 py-0.5 rounded font-bold">
-                  Aktyvuota
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 mt-0.5">
-                Automatinis darbuotojų prijungimas per <code>Cf-Access-Authenticated-User-Email</code> ir griežta mokinių blokada.
-              </p>
-            </div>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-          {/* Explanation on the left */}
-          <div className="lg:col-span-6 space-y-2 text-xs text-slate-300">
-            <div className="p-3 bg-slate-800/80 rounded-lg border border-slate-700 space-y-1.5">
-              <div className="font-bold text-white flex items-center gap-1.5">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                <span>Kaip tai veikia realybėje:</span>
-              </div>
-              <p className="text-[11px] text-slate-400 leading-relaxed">
-                1. Mokytojas atidaro nuorodą per Cloudflare tunelį ir patvirtina savo Google paštą.
-              </p>
-              <p className="text-[11px] text-slate-400 leading-relaxed">
-                2. Serveris patikrina, ar šis el. paštas yra žemiau esančiame darbuotojų sąraše.
-              </p>
-              <p className="text-[11px] text-slate-400 leading-relaxed">
-                3. <strong>Mokytojas iškart prijungiamas</strong> prie savo kabineto be jokių slaptažodžių.
-              </p>
-              <p className="text-[11px] text-rose-300 leading-relaxed">
-                4. <strong>Mokinys su @tryskiumokykla.lt</strong> yra akimirksniu sustabdomas – mato tik „Prieiga apribota“ pranešimą.
-              </p>
-            </div>
-          </div>
-
-          {/* Interactive Tester on the right */}
-          <div className="lg:col-span-6 bg-slate-800/90 border border-slate-700 p-4 rounded-xl space-y-3">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
-                <Play className="w-3.5 h-3.5 text-blue-400" />
-                <span>Išbandyti atpažinimą (Simuliatorius)</span>
-              </label>
-              <span className="text-[10px] text-slate-400">Patikrinkite taisykles</span>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <input
-                type="email"
-                value={simEmail}
-                onChange={(e) => {
-                  setSimEmail(e.target.value);
-                  setSimResult(null);
-                }}
-                placeholder="pvz. jonas.mokinys@tryskiumokykla.lt"
-                className="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
-              />
-              <button
-                type="button"
-                onClick={() => handleRunSimulation(simEmail)}
-                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer shrink-0"
-              >
-                Tikrinti
-              </button>
-            </div>
-
-            {/* Quick Presets */}
-            <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
-              <span className="text-slate-400">Greiti pavyzdžiai:</span>
-              <button
-                type="button"
-                onClick={() => {
-                  setSimEmail('jonas.mokinys@tryskiumokykla.lt');
-                  handleRunSimulation('jonas.mokinys@tryskiumokykla.lt');
-                }}
-                className="px-2 py-0.5 bg-rose-500/20 text-rose-300 border border-rose-500/30 rounded cursor-pointer hover:bg-rose-500/30"
-              >
-                Mokinys (@tryskiumokykla.lt)
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setSimEmail('rasa.j@tryskiumokykla.lt');
-                  handleRunSimulation('rasa.j@tryskiumokykla.lt');
-                }}
-                className="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded cursor-pointer hover:bg-emerald-500/30"
-              >
-                Mokytoja (Rasa J.)
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setSimEmail('kestutis.labanauskas@tryskiumokykla.lt');
-                  handleRunSimulation('kestutis.labanauskas@tryskiumokykla.lt');
-                }}
-                className="px-2 py-0.5 bg-blue-500/20 text-blue-300 border border-blue-500/30 rounded cursor-pointer hover:bg-blue-500/30"
-              >
-                Administratorius
-              </button>
-            </div>
-
-            {/* Simulation Result Box */}
-            {simResult && (
-              <div
-                className={`p-3 rounded-lg border text-xs space-y-2 animate-fade-in ${
-                  simResult.allowed
-                    ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
-                    : 'bg-rose-950/40 border-rose-500/40 text-rose-200'
-                }`}
-              >
-                <div className="leading-relaxed font-medium">{simResult.message}</div>
-
-                {onSimulateCloudflareLogin && (
-                  <div className="pt-2 border-t border-white/10 flex items-center justify-between">
-                    <span className="text-[11px] text-slate-300">
-                      Norite pamatyti, ką pamatys vartotojas ekrane?
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => onSimulateCloudflareLogin(simEmail)}
-                      className="px-2.5 py-1 bg-white text-slate-900 rounded font-bold text-[11px] hover:bg-slate-200 transition-colors cursor-pointer"
-                    >
-                      Išbandyti gyvai ekrane
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         </div>
       </div>
