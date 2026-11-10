@@ -44,6 +44,14 @@ export interface AppDatabase {
   authSettings?: AuthSettings;
 }
 
+let syncTimer: any = null;
+const debouncedServerSync = () => {
+  if (syncTimer) clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => {
+    StorageService.syncToServer().catch(err => console.warn('Server sync error:', err));
+  }, 400);
+};
+
 export const StorageService = {
   getDepartments(): Department[] {
     const raw = localStorage.getItem(STORAGE_KEYS.DEPARTMENTS);
@@ -60,6 +68,7 @@ export const StorageService = {
 
   saveDepartments(departments: Department[]) {
     localStorage.setItem(STORAGE_KEYS.DEPARTMENTS, JSON.stringify(departments));
+    debouncedServerSync();
   },
 
   getRooms(): Room[] {
@@ -77,6 +86,7 @@ export const StorageService = {
 
   saveRooms(rooms: Room[]) {
     localStorage.setItem(STORAGE_KEYS.ROOMS, JSON.stringify(rooms));
+    debouncedServerSync();
   },
 
   getUsers(): User[] {
@@ -94,6 +104,7 @@ export const StorageService = {
 
   saveUsers(users: User[]) {
     localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+    debouncedServerSync();
   },
 
   getItems(): InventoryItem[] {
@@ -156,6 +167,7 @@ export const StorageService = {
 
   saveItems(items: InventoryItem[]) {
     localStorage.setItem(STORAGE_KEYS.ITEMS, JSON.stringify(items));
+    debouncedServerSync();
   },
 
   getMovements(): MovementRecord[] {
@@ -173,6 +185,7 @@ export const StorageService = {
 
   saveMovements(movements: MovementRecord[]) {
     localStorage.setItem(STORAGE_KEYS.MOVEMENTS, JSON.stringify(movements));
+    debouncedServerSync();
   },
 
   getWriteOffActs(): WriteOffAct[] {
@@ -193,6 +206,7 @@ export const StorageService = {
 
   saveWriteOffActs(acts: WriteOffAct[]) {
     localStorage.setItem(STORAGE_KEYS.WRITEOFFS, JSON.stringify(acts));
+    debouncedServerSync();
   },
 
   getAuditSessions(): AuditSession[] {
@@ -210,6 +224,7 @@ export const StorageService = {
 
   saveAuditSessions(sessions: AuditSession[]) {
     localStorage.setItem(STORAGE_KEYS.AUDIT_SESSIONS, JSON.stringify(sessions));
+    debouncedServerSync();
   },
 
   getActiveUserId(): string | null {
@@ -239,6 +254,7 @@ export const StorageService = {
 
   saveAuthSettings(settings: AuthSettings) {
     localStorage.setItem(STORAGE_KEYS.AUTH_SETTINGS, JSON.stringify(settings));
+    debouncedServerSync();
   },
 
   // Export full application state as JSON for Proxmox backup
@@ -256,6 +272,58 @@ export const StorageService = {
       authSettings: this.getAuthSettings(),
     };
     return JSON.stringify(payload, null, 2);
+  },
+
+  // Central Proxmox Server Synchronization
+  async syncToServer(): Promise<void> {
+    try {
+      const payload: AppDatabase = {
+        version: '1.0.0',
+        exportedAt: new Date().toISOString(),
+        departments: this.getDepartments(),
+        rooms: this.getRooms(),
+        users: this.getUsers(),
+        items: this.getItems(),
+        movements: this.getMovements(),
+        writeOffActs: this.getWriteOffActs(),
+        auditSessions: this.getAuditSessions(),
+        authSettings: this.getAuthSettings(),
+      };
+      await fetch('/api/database', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch (e) {
+      console.warn('Server sync offline or fallback mode', e);
+    }
+  },
+
+  async loadFromServer(): Promise<boolean> {
+    try {
+      const res = await fetch('/api/database');
+      if (!res.ok) return false;
+      const data: AppDatabase | null = await res.json();
+      if (!data) {
+        // First run on new server: seed server database with current initial data
+        await this.syncToServer();
+        return false;
+      }
+
+      if (Array.isArray(data.departments)) localStorage.setItem(STORAGE_KEYS.DEPARTMENTS, JSON.stringify(data.departments));
+      if (Array.isArray(data.rooms)) localStorage.setItem(STORAGE_KEYS.ROOMS, JSON.stringify(data.rooms));
+      if (Array.isArray(data.users)) localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(data.users));
+      if (Array.isArray(data.items)) localStorage.setItem(STORAGE_KEYS.ITEMS, JSON.stringify(data.items));
+      if (Array.isArray(data.movements)) localStorage.setItem(STORAGE_KEYS.MOVEMENTS, JSON.stringify(data.movements));
+      if (Array.isArray(data.writeOffActs)) localStorage.setItem(STORAGE_KEYS.WRITEOFFS, JSON.stringify(data.writeOffActs));
+      if (Array.isArray(data.auditSessions)) localStorage.setItem(STORAGE_KEYS.AUDIT_SESSIONS, JSON.stringify(data.auditSessions));
+      if (data.authSettings) localStorage.setItem(STORAGE_KEYS.AUTH_SETTINGS, JSON.stringify(data.authSettings));
+
+      return true;
+    } catch (e) {
+      console.warn('Could not load from /api/database, using local storage cache', e);
+      return false;
+    }
   },
 
   // Restore application state from backup JSON

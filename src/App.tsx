@@ -82,6 +82,15 @@ export default function App() {
     setAuthSettings(StorageService.getAuthSettings());
   }, []);
 
+  // Initial sync from central Proxmox server disk
+  useEffect(() => {
+    StorageService.loadFromServer().then((hasServerData) => {
+      if (hasServerData) {
+        refreshFromStorage();
+      }
+    });
+  }, [refreshFromStorage]);
+
   const currentUser = users.find(u => u.id === activeUserId) || null;
   const activeAuditSession = auditSessions[0];
 
