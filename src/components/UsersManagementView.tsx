@@ -61,11 +61,6 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [roleFilter, setRoleFilter] = useState<'all' | UserRole>('all');
 
-  // Local settings state
-  const [settings, setSettings] = useState<AuthSettings>(authSettings);
-  const [newGmailInput, setNewGmailInput] = useState('');
-  const [saveSuccess, setSaveSuccess] = useState(false);
-
   // CSV Import Modal state
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [csvText, setCsvText] = useState('');
@@ -94,31 +89,6 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
     }
     return true;
   });
-
-  const handleAddWhitelistedEmail = () => {
-    const emailToAdd = newGmailInput.trim().toLowerCase();
-    if (!emailToAdd || !emailToAdd.includes('@')) return;
-    if (settings.whitelistedEmails.includes(emailToAdd)) return;
-
-    setSettings({
-      ...settings,
-      whitelistedEmails: [...settings.whitelistedEmails, emailToAdd],
-    });
-    setNewGmailInput('');
-  };
-
-  const handleRemoveWhitelistedEmail = (emailToRemove: string) => {
-    setSettings({
-      ...settings,
-      whitelistedEmails: settings.whitelistedEmails.filter((e) => e !== emailToRemove),
-    });
-  };
-
-  const handleSaveSettings = () => {
-    onUpdateAuthSettings(settings);
-    setSaveSuccess(true);
-    setTimeout(() => setSaveSuccess(false), 3000);
-  };
 
   const handleToggleUserActive = (user: User) => {
     if (user.id === currentUser.id) {
@@ -378,11 +348,11 @@ Tomas Daukantas;tomas.d@tryskiumokykla.lt;Fizinio ugdymo mokytojas;teacher;S-01`
           </div>
 
           <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-            <span className="text-[11px] font-medium text-slate-500 uppercase tracking-wider block">Gmail baltasis sąrašas</span>
+            <span className="text-[11px] font-medium text-slate-500 uppercase tracking-wider block">Aktyvios paskyros</span>
             <span className="text-lg font-bold text-indigo-700 font-mono mt-0.5 block">
-              {settings.whitelistedEmails.length}
+              {users.filter(u => u.isActive !== false).length}
             </span>
-            <span className="text-[10px] text-slate-400">Patvirtinti Google el. paštai</span>
+            <span className="text-[10px] text-slate-400">Iš viso registruota: {users.length}</span>
           </div>
         </div>
       </div>
@@ -525,188 +495,6 @@ Tomas Daukantas;tomas.d@tryskiumokykla.lt;Fizinio ugdymo mokytojas;teacher;S-01`
                 )}
               </div>
             )}
-          </div>
-        </div>
-      </div>
-
-      {/* Security & Gmail Whitelist Configuration Card */}
-      <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-2xs space-y-4">
-        <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-indigo-50 border border-indigo-200 flex items-center justify-center text-indigo-600">
-              <ShieldCheck className="w-4 h-4" />
-            </div>
-            <div>
-              <h2 className="text-sm font-bold text-slate-900">
-                Prisijungimo saugumo taisyklės (Gmail & Domeno kontrolė)
-              </h2>
-              <p className="text-xs text-slate-500">
-                Apsaugokite savarankiškai talpinamą (Proxmox) serverį nuo pašalinių asmenų prisijungimų
-              </p>
-            </div>
-          </div>
-
-          <button
-            onClick={handleSaveSettings}
-            className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
-              saveSuccess
-                ? 'bg-emerald-600 text-white'
-                : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs'
-            }`}
-          >
-            {saveSuccess ? (
-              <>
-                <Check className="w-4 h-4" />
-                <span>Nustatymai išsaugoti!</span>
-              </>
-            ) : (
-              <>
-                <Save className="w-4 h-4" />
-                <span>Išsaugoti saugumo taisykles</span>
-              </>
-            )}
-          </button>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {/* Left Rule 1: Strict Whitelist Mode */}
-          <div className="space-y-4">
-            <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg">
-              <label className="relative flex items-start gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={settings.allowOnlyWhitelistedEmails}
-                  onChange={(e) =>
-                    setSettings({ ...settings, allowOnlyWhitelistedEmails: e.target.checked })
-                  }
-                  className="sr-only peer"
-                />
-                <div className="w-10 h-5 bg-slate-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600 shrink-0 mt-0.5"></div>
-                <div>
-                  <span className="text-xs font-bold text-slate-900 block">
-                    Griežtas baltasis sąrašas (Rekomenduojama mokyklai)
-                  </span>
-                  <span className="text-[11px] text-slate-500 block mt-0.5 leading-relaxed">
-                    Jungiantis su Google / Gmail, leidžiama prisijungti <strong>tik tiems adresams</strong>, kurie yra žemiau esančiame sąraše arba registruoti darbuotojų kortelėse. Visiems kitiems prieiga griežtai blokuojama.
-                  </span>
-                </div>
-              </label>
-            </div>
-
-            {/* School Domain Whitelist */}
-            <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
-              <label className="block text-xs font-bold text-slate-800">
-                Gimnazijos oficialus domenas
-              </label>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-slate-400 font-mono">@</span>
-                <input
-                  type="text"
-                  value={settings.allowedSchoolDomain}
-                  onChange={(e) =>
-                    setSettings({ ...settings, allowedSchoolDomain: e.target.value.trim() })
-                  }
-                  placeholder="tryskiumokykla.lt"
-                  className="flex-1 px-3 py-1.5 border border-slate-300 rounded-md text-xs font-mono font-medium focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                />
-              </div>
-              <p className="text-[10px] text-slate-500">
-                Darbuotojai su šiuo domenu (pvz. <code>@tryskiumokykla.lt</code>) yra automatiškai autorizuojami pagal jų darbuotojo kortelę.
-              </p>
-            </div>
-
-            {/* Admin PIN code */}
-            <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                  <KeyRound className="w-3.5 h-3.5 text-indigo-600" />
-                  <span>Administratoriaus apsaugos PIN</span>
-                </label>
-                <span className="text-[10px] text-slate-400 font-mono">Numatytasis: 1234</span>
-              </div>
-              <input
-                type="text"
-                maxLength={6}
-                value={settings.adminPin}
-                onChange={(e) =>
-                  setSettings({ ...settings, adminPin: e.target.value })
-                }
-                className="w-32 px-3 py-1.5 border border-slate-300 rounded-md text-xs font-mono font-bold text-center tracking-widest focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              />
-              <p className="text-[10px] text-slate-500">
-                Naudojamas greitam administratoriaus tapatybės patvirtinimui arba prisijungimui vietoje.
-              </p>
-            </div>
-          </div>
-
-          {/* Right Rule 2: Specific Whitelisted Gmails List */}
-          <div className="space-y-3 p-4 bg-slate-50 border border-slate-200 rounded-lg flex flex-col justify-between">
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <label className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                  <Mail className="w-3.5 h-3.5 text-indigo-600" />
-                  <span>Patvirtinti asmeniniai Gmail / kiti el. paštai</span>
-                </label>
-                <span className="text-[10px] font-mono bg-indigo-100 text-indigo-800 px-1.5 py-0.2 rounded font-semibold">
-                  {settings.whitelistedEmails.length} vnt.
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-500 mb-3">
-                Jeigu mokytojai ar ūkio darbuotojai neturi mokyklos pašto ir jungiasi su asmeniniu <code>@gmail.com</code>, įrašykite juos čia:
-              </p>
-
-              {/* Add Gmail Input */}
-              <div className="flex items-center gap-2 mb-3">
-                <input
-                  type="email"
-                  value={newGmailInput}
-                  onChange={(e) => setNewGmailInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      handleAddWhitelistedEmail();
-                    }
-                  }}
-                  placeholder="pvz. kestutis.tryskiai@gmail.com"
-                  className="flex-1 px-3 py-1.5 border border-slate-300 rounded-md text-xs font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                />
-                <button
-                  type="button"
-                  onClick={handleAddWhitelistedEmail}
-                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md text-xs font-semibold transition-colors flex items-center gap-1 cursor-pointer"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Pridėti</span>
-                </button>
-              </div>
-
-              {/* Whitelist Tags / Items */}
-              <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
-                {settings.whitelistedEmails.map((email) => (
-                  <div
-                    key={email}
-                    className="flex items-center justify-between px-2.5 py-1.5 bg-white border border-slate-200 rounded text-xs font-mono text-slate-700"
-                  >
-                    <span className="truncate">{email}</span>
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveWhitelistedEmail(email)}
-                      className="text-slate-400 hover:text-rose-600 p-0.5 rounded cursor-pointer transition-colors"
-                      title="Pašalinti iš baltojo sąrašo"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="pt-3 border-t border-slate-200 text-[10px] text-slate-500 flex items-center gap-1.5">
-              <Info className="w-3.5 h-3.5 text-blue-500 shrink-0" />
-              <span>
-                Pakeitimai įsigalioja iškart, kai paspaudžiate „Išsaugoti saugumo taisykles“.
-              </span>
-            </div>
           </div>
         </div>
       </div>
