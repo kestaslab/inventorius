@@ -2,6 +2,10 @@
 set -e
 echo "=== Atnaujinama Tryškių Lazdynų Pelėdos gimnazijos inventoriaus sistema ==="
 cd /opt/inventorius || cd "$(dirname "$0")"
+# Atstatome vietinius pakeitimus, kad git pull niekada neužstrigtų
+git reset --hard
+git clean -fd
+
 git pull
 npm install --legacy-peer-deps
 npm run build

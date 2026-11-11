@@ -61,8 +61,8 @@ export const LoginPortalView: React.FC<LoginPortalViewProps> = ({
     setTimeout(() => {
       // Find expected PIN
       const expectedPin = selectedUser.role === 'admin'
-        ? (selectedUser.pinCode || authSettings.adminPin || '1234')
-        : (selectedUser.pinCode || '1234');
+        ? (selectedUser.pinCode || authSettings.adminPin || '1953')
+        : (selectedUser.pinCode || '2026');
 
       const isPinValid = trimmedPin === expectedPin;
 

@@ -307,7 +307,7 @@ export const UserModal: React.FC<UserModalProps> = ({
                   maxLength={6}
                   value={pinCode}
                   onChange={(e) => setPinCode(e.target.value)}
-                  placeholder="1234"
+                  placeholder="pvz. 1953"
                   className="w-full pl-8 pr-3 py-2 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono font-bold"
                 />
               </div>
