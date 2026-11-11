@@ -44,13 +44,10 @@ export interface AppDatabase {
   authSettings?: AuthSettings;
 }
 
-let syncTimer: any = null;
-const debouncedServerSync = () => {
-  if (syncTimer) clearTimeout(syncTimer);
-  syncTimer = setTimeout(() => {
-    StorageService.syncToServer().catch(err => console.warn('Server sync error:', err));
-  }, 400);
+const triggerImmediateServerSync = () => {
+  StorageService.syncToServer().catch(err => console.warn('Server sync error:', err));
 };
+
 
 export const StorageService = {
   getDepartments(): Department[] {
@@ -68,7 +65,7 @@ export const StorageService = {
 
   saveDepartments(departments: Department[]) {
     localStorage.setItem(STORAGE_KEYS.DEPARTMENTS, JSON.stringify(departments));
-    debouncedServerSync();
+    triggerImmediateServerSync();
   },
 
   getRooms(): Room[] {
@@ -86,7 +83,7 @@ export const StorageService = {
 
   saveRooms(rooms: Room[]) {
     localStorage.setItem(STORAGE_KEYS.ROOMS, JSON.stringify(rooms));
-    debouncedServerSync();
+    triggerImmediateServerSync();
   },
 
   getUsers(): User[] {
@@ -104,7 +101,7 @@ export const StorageService = {
 
   saveUsers(users: User[]) {
     localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
-    debouncedServerSync();
+    triggerImmediateServerSync();
   },
 
   getItems(): InventoryItem[] {
@@ -167,7 +164,7 @@ export const StorageService = {
 
   saveItems(items: InventoryItem[]) {
     localStorage.setItem(STORAGE_KEYS.ITEMS, JSON.stringify(items));
-    debouncedServerSync();
+    triggerImmediateServerSync();
   },
 
   getMovements(): MovementRecord[] {
@@ -185,7 +182,7 @@ export const StorageService = {
 
   saveMovements(movements: MovementRecord[]) {
     localStorage.setItem(STORAGE_KEYS.MOVEMENTS, JSON.stringify(movements));
-    debouncedServerSync();
+    triggerImmediateServerSync();
   },
 
   getWriteOffActs(): WriteOffAct[] {
@@ -206,7 +203,7 @@ export const StorageService = {
 
   saveWriteOffActs(acts: WriteOffAct[]) {
     localStorage.setItem(STORAGE_KEYS.WRITEOFFS, JSON.stringify(acts));
-    debouncedServerSync();
+    triggerImmediateServerSync();
   },
 
   getAuditSessions(): AuditSession[] {
@@ -224,7 +221,7 @@ export const StorageService = {
 
   saveAuditSessions(sessions: AuditSession[]) {
     localStorage.setItem(STORAGE_KEYS.AUDIT_SESSIONS, JSON.stringify(sessions));
-    debouncedServerSync();
+    triggerImmediateServerSync();
   },
 
   getActiveUserId(): string | null {
@@ -254,7 +251,7 @@ export const StorageService = {
 
   saveAuthSettings(settings: AuthSettings) {
     localStorage.setItem(STORAGE_KEYS.AUTH_SETTINGS, JSON.stringify(settings));
-    debouncedServerSync();
+    triggerImmediateServerSync();
   },
 
   // Export full application state as JSON for Proxmox backup
