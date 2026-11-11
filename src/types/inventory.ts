@@ -36,12 +36,22 @@ export interface Department {
 export interface Room {
   id: string;
   departmentId: string;
-  number: string;
+  number?: string; // Neprivalomas (jei mokykloje kabinetai vadinami tiesiog vardais, pvz., 'Lietuvių kalbos kabinetas nr. 1')
   name: string;
   floor: number;
   defaultResponsiblePersonId?: string;
   notes?: string;
 }
+
+export const formatRoomName = (room?: { number?: string; name: string } | null, withKabSuffix: boolean = false): string => {
+  if (!room) return 'Nenurodyta';
+  const num = room.number?.trim();
+  if (num) {
+    return withKabSuffix ? `${num} kab. ${room.name}` : `${num} ${room.name}`;
+  }
+  return room.name;
+};
+
 
 export type ItemCategory = 
   | 'Kompiuteriai'

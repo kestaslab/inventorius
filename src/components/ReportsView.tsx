@@ -19,7 +19,8 @@ import {
   LONG_TERM_THRESHOLD,
   FUNDING_SOURCE_LABELS,
   FUNDING_SOURCE_SHORT_LABELS,
-  ASSET_CLASS_LABELS
+  ASSET_CLASS_LABELS,
+  formatRoomName
 } from '../types/inventory';
 
 interface ReportsViewProps {
@@ -162,7 +163,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           <div style="font-size:10pt; color:#444;">Nr. INV-2026/01 · Sudarymo data: ${dateStr}</div>
           <div style="font-size:9.5pt; margin-top:4pt;">
             Objektas: <b>${selectedDepartment ? selectedDepartment.name : 'Visi mokyklos skyriai'}</b>
-            ${selectedRoom ? ` · Kabinetas: <b>${selectedRoom.number} ${selectedRoom.name}</b>` : ''}
+            ${selectedRoom ? ` · Patalpa: <b>${formatRoomName(selectedRoom)}</b>` : ''}
             ${selectedUser ? ` · Atsakingas asmuo: <b>${selectedUser.fullName}</b>` : ''}
           </div>
         </div>
@@ -502,7 +503,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                 {rooms
                   .filter(r => filterDeptId === 'all' || r.departmentId === filterDeptId)
                   .map(r => (
-                    <option key={r.id} value={r.id}>{r.number} {r.name}</option>
+                    <option key={r.id} value={r.id}>{formatRoomName(r)}</option>
                   ))}
               </select>
             </div>
@@ -710,7 +711,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                 </div>
                 <div className="text-xs text-slate-700 pt-1">
                   Objektas: <strong>{selectedDepartment ? selectedDepartment.name : 'Visi mokyklos skyriai'}</strong>
-                  {selectedRoom && <> · Kabinetas: <strong>{selectedRoom.number} {selectedRoom.name}</strong></>}
+                  {selectedRoom && <> · Patalpa: <strong>{formatRoomName(selectedRoom)}</strong></>}
                   {selectedUser && <> · Atsakingas asmuo: <strong>{selectedUser.fullName}</strong></>}
                   {filterFundingSource !== 'all' && (
                     <> · Šaltinis: <strong className="text-blue-900">{FUNDING_SOURCE_LABELS[filterFundingSource]}</strong></>

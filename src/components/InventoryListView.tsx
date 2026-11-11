@@ -45,7 +45,8 @@ import {
   COMPUTER_TYPE_SHORT_LABELS,
   ASSET_CLASS_SHORT_LABELS,
   FUNDING_SOURCE_SHORT_LABELS,
-  LONG_TERM_THRESHOLD
+  LONG_TERM_THRESHOLD,
+  formatRoomName
 } from '../types/inventory';
 import { StorageService } from '../utils/storage';
 
@@ -586,7 +587,7 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
             >
               <option value="all">Visi kabinetai ({availableRooms.length})</option>
               {availableRooms.map(r => (
-                <option key={r.id} value={r.id}>{r.number} {r.name}</option>
+                <option key={r.id} value={r.id}>{formatRoomName(r)}</option>
               ))}
             </select>
           </div>
@@ -1066,7 +1067,7 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
                           {/* Room & Dept */}
                           <td className="py-2.5 px-3 whitespace-nowrap">
                             <div className="text-slate-800 font-medium">
-                              {room ? `${room.number} kab.` : 'Nenurodyta'}
+                              {formatRoomName(room, true)}
                             </div>
                             <div className="text-[11px] text-slate-400 truncate">
                               {dept?.name}
@@ -1105,7 +1106,7 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
                           {/* Room & Dept */}
                           <td className="py-2.5 px-3 whitespace-nowrap">
                             <div className="text-slate-800 font-medium">
-                              {room ? `${room.number} kab.` : 'Nenurodyta'}
+                              {formatRoomName(room, true)}
                             </div>
                             <div className="text-[11px] text-slate-400 truncate">
                               {dept?.name}

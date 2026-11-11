@@ -31,7 +31,8 @@ import {
   COMPUTER_TYPE_LABELS,
   ASSET_CLASS_LABELS,
   FUNDING_SOURCE_LABELS,
-  LONG_TERM_THRESHOLD 
+  LONG_TERM_THRESHOLD,
+  formatRoomName 
 } from '../types/inventory';
 import { StorageService } from '../utils/storage';
 import { compressPhoto } from '../utils/imageCompressor';
@@ -598,7 +599,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
                 className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500"
               >
                 {availableRooms.map((r) => (
-                  <option key={r.id} value={r.id}>{r.number} {r.name}</option>
+                  <option key={r.id} value={r.id}>{formatRoomName(r)}</option>
                 ))}
               </select>
             </div>

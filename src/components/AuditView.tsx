@@ -12,7 +12,7 @@ import {
   RefreshCw,
   Printer
 } from 'lucide-react';
-import { InventoryItem, Department, Room, AuditSession, User } from '../types/inventory';
+import { InventoryItem, Department, Room, AuditSession, User, formatRoomName } from '../types/inventory';
 
 interface AuditViewProps {
   items: InventoryItem[];
@@ -190,7 +190,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
                 const count = items.filter(i => i.roomId === r.id).length;
                 return (
                   <option key={r.id} value={r.id}>
-                    {r.number} kab. {r.name} ({dept?.code}) — {count} vnt.
+                    {formatRoomName(r, true)} ({dept?.code}) — {count} vnt.
                   </option>
                 );
               })}

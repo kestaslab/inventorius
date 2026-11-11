@@ -12,7 +12,7 @@ import {
   Trash2,
   AlertTriangle
 } from 'lucide-react';
-import { Department, Room, InventoryItem, User } from '../types/inventory';
+import { Department, Room, InventoryItem, User, formatRoomName } from '../types/inventory';
 
 interface DepartmentsRoomsViewProps {
   departments: Department[];
@@ -165,7 +165,7 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
     setEditingRoom(room);
     setRoomForm({
       departmentId: room.departmentId,
-      number: room.number,
+      number: room.number || '',
       name: room.name,
       floor: room.floor,
       defaultResponsiblePersonId: room.defaultResponsiblePersonId || '',
@@ -189,13 +189,13 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
 
   const handleSaveRoomSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!roomForm.number || !roomForm.name) return;
+    if (!roomForm.name.trim()) return;
 
     if (editingRoom) {
       const updatedRoom: Room = {
         ...editingRoom,
         departmentId: roomForm.departmentId || editingRoom.departmentId,
-        number: roomForm.number.trim(),
+        number: roomForm.number.trim() || undefined,
         name: roomForm.name.trim(),
         floor: Number(roomForm.floor),
         defaultResponsiblePersonId: roomForm.defaultResponsiblePersonId || editingRoom.defaultResponsiblePersonId,
@@ -207,7 +207,7 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
       const newRoom: Room = {
         id: `room-${Date.now()}`,
         departmentId: targetDeptId,
-        number: roomForm.number.trim(),
+        number: roomForm.number.trim() || undefined,
         name: roomForm.name.trim(),
         floor: Number(roomForm.floor),
         defaultResponsiblePersonId: roomForm.defaultResponsiblePersonId || users[0]?.id,
@@ -367,13 +367,13 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
                     }`}
                   >
                     <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <DoorClosed className={`w-4 h-4 ${isSelected ? 'text-blue-100' : 'text-slate-600'}`} />
-                        <span className={`text-xs font-bold ${isSelected ? 'text-white' : 'text-slate-900'}`}>
-                          {room.number} kab.
+                      <div className="flex items-center gap-2 min-w-0">
+                        <DoorClosed className={`w-4 h-4 shrink-0 ${isSelected ? 'text-blue-100' : 'text-slate-600'}`} />
+                        <span className={`text-xs font-bold truncate ${isSelected ? 'text-white' : 'text-slate-900'}`}>
+                          {room.number?.trim() ? `${room.number} kab.` : room.name}
                         </span>
                       </div>
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 shrink-0">
                         <span className={`text-[11px] font-mono tabular-nums font-semibold ${isSelected ? 'text-blue-100' : 'text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200'}`}>
                           {countItems} vnt.
                         </span>
@@ -406,9 +406,11 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
                       </div>
                     </div>
 
-                    <div className={`text-xs mt-1 truncate font-medium ${isSelected ? 'text-blue-50' : 'text-slate-700'}`}>
-                      {room.name}
-                    </div>
+                    {room.number?.trim() && (
+                      <div className={`text-xs mt-1 truncate font-medium ${isSelected ? 'text-blue-50' : 'text-slate-700'}`}>
+                        {room.name}
+                      </div>
+                    )}
 
                     <div className={`mt-2.5 pt-2 flex items-center justify-between text-[11px] border-t ${
                       isSelected ? 'border-blue-500/60 text-blue-100' : 'border-slate-200 text-slate-500'
@@ -427,7 +429,7 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
         <div className="md:col-span-4 space-y-3">
           <div className="flex items-center justify-between px-1">
             <span className="text-xs font-semibold uppercase text-slate-500 tracking-wider truncate">
-              {activeRoom ? `${activeRoom.number} kab. inventorius (${roomItems.length})` : 'Patalpos inventorius'}
+              {activeRoom ? `${formatRoomName(activeRoom, true)} inventorius (${roomItems.length})` : 'Patalpos inventorius'}
             </span>
           </div>
 
@@ -611,11 +613,12 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-slate-700 font-medium mb-1">Kabineto Nr. *</label>
+                  <label className="block text-slate-700 font-medium mb-1">
+                    Kabineto Nr. <span className="text-slate-400 font-normal text-[11px]">(neprivaloma)</span>
+                  </label>
                   <input
                     type="text"
-                    required
-                    placeholder="pvz., 104 arba B-02"
+                    placeholder="pvz., 1, 104 ar palikti tuščią"
                     value={roomForm.number}
                     onChange={(e) => setRoomForm({ ...roomForm, number: e.target.value })}
                     className="w-full border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500 font-mono font-medium"
@@ -639,10 +642,10 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
                 <input
                   type="text"
                   required
-                  placeholder="pvz., Istorijos kabinetas"
+                  placeholder="pvz., Lietuvių kalbos kabinetas nr. 1, Fizikos kabinetas, Aktų salė"
                   value={roomForm.name}
                   onChange={(e) => setRoomForm({ ...roomForm, name: e.target.value })}
-                  className="w-full border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500"
+                  className="w-full border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500 font-medium"
                 />
               </div>
 
@@ -754,12 +757,12 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
               </div>
 
               <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-xs space-y-1">
-                <div className="font-bold text-slate-900">{roomToDelete.number} {roomToDelete.name}</div>
+                <div className="font-bold text-slate-900">{formatRoomName(roomToDelete, true)}</div>
                 <div className="text-slate-600">{roomToDelete.floor} aukštas</div>
               </div>
 
               <p className="text-xs text-slate-700 leading-relaxed">
-                Ar tikrai norite ištrinti kabinetą <strong>„{roomToDelete.number} {roomToDelete.name}“</strong>?
+                Ar tikrai norite ištrinti kabinetą <strong>„{formatRoomName(roomToDelete, true)}“</strong>?
               </p>
 
               {(() => {

@@ -34,7 +34,8 @@ import {
   ASSET_CLASS_LABELS,
   FUNDING_SOURCE_LABELS,
   LONG_TERM_THRESHOLD,
-  COMPUTER_TYPE_LABELS
+  COMPUTER_TYPE_LABELS,
+  formatRoomName
 } from '../types/inventory';
 import { compressPhoto } from '../utils/imageCompressor';
 import { formatAgeDisplay } from './InventoryListView';
@@ -452,7 +453,7 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
               <div className="flex justify-between">
                 <span className="text-slate-500">Patalpa:</span>
                 <span className="font-medium text-slate-900">
-                  {room ? `${room.number} kab. ${room.name}` : 'Nenurodyta'}
+                  {formatRoomName(room, true)}
                 </span>
               </div>
               <div className="flex justify-between">

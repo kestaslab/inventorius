@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, UserPlus, Shield, Mail, Phone, Lock, Building2, CheckCircle2, AlertCircle } from 'lucide-react';
-import { User, UserRole, Department, Room } from '../types/inventory';
+import { User, UserRole, Department, Room, formatRoomName } from '../types/inventory';
 
 interface UserModalProps {
   isOpen: boolean;
@@ -269,7 +269,7 @@ export const UserModal: React.FC<UserModalProps> = ({
                   .filter((r) => !departmentId || r.departmentId === departmentId)
                   .map((r) => (
                     <option key={r.id} value={r.id}>
-                      {r.number} {r.name}
+                      {formatRoomName(r)}
                     </option>
                   ))}
               </select>

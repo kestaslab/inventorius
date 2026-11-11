@@ -6,7 +6,8 @@ import {
   MovementRecord, 
   WriteOffAct, 
   AuditSession,
-  AuthSettings 
+  AuthSettings,
+  formatRoomName 
 } from '../types/inventory';
 import { 
   INITIAL_DEPARTMENTS, 
@@ -399,7 +400,7 @@ export const StorageService = {
     const rows = items.map(item => {
       const dept = departments.find(d => d.id === item.departmentId)?.name || '';
       const room = rooms.find(r => r.id === item.roomId);
-      const roomStr = room ? `${room.number} ${room.name}` : '';
+      const roomStr = formatRoomName(room);
       const user = users.find(u => u.id === item.responsibleUserId)?.fullName || '';
       
       const assetClassStr = item.assetClass === 'long_term' || item.purchasePrice >= 750 

@@ -26,7 +26,7 @@ import {
   ArrowRight,
   RotateCcw
 } from 'lucide-react';
-import { InventoryItem, Department, Room } from '../types/inventory';
+import { InventoryItem, Department, Room, formatRoomName } from '../types/inventory';
 import { directPrintBrotherLabels } from '../utils/brotherPrinter';
 
 interface LabelsQRViewProps {
@@ -249,7 +249,7 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
     const labelRows = listToExport.map(item => {
       const qrUrl = qrMap[item.id] || '';
       const room = rooms.find(r => r.id === item.roomId);
-      const roomName = room ? `${room.number} kab.` : '';
+      const roomName = formatRoomName(room, true);
 
       return `
         <div style="page-break-inside: avoid; border: 1.5pt solid #000; width: ${labelLength}mm; height: ${tapeWidth}mm; margin-bottom: 6mm; padding: 2mm 3mm; box-sizing: border-box; font-family: Arial, sans-serif;">
@@ -314,7 +314,7 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
     const rows = listToExport.map(item => {
       const room = rooms.find(r => r.id === item.roomId);
       const dept = departments.find(d => d.id === item.departmentId);
-      const roomStr = room ? `${room.number} ${room.name}` : '';
+      const roomStr = formatRoomName(room);
       const payload = `${item.inventoryNumber} | ${item.name} | Tryškių L. Pelėdos gimn.`;
       return [
         `"${item.inventoryNumber}"`,
@@ -466,7 +466,7 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
                     const countInRoom = items.filter(i => i.roomId === r.id && i.status !== 'written_off').length;
                     return (
                       <option key={r.id} value={r.id}>
-                        {r.number} {r.name} ({countInRoom} vnt.)
+                        {formatRoomName(r)} ({countInRoom} vnt.)
                       </option>
                     );
                   })}
@@ -740,7 +740,7 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
                           </span>
                         </div>
                         <div className="text-[11px] text-slate-500 flex items-center gap-2 mt-0.5">
-                          <span>{room ? `${room.number} ${room.name}` : 'Kabinetas nenurodytas'}</span>
+                          <span>{formatRoomName(room)}</span>
                           {item.serialNumber && (
                             <>
                               <span>·</span>
@@ -868,7 +868,7 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
                 >
                   <option value="all">Visi kabinetai</option>
                   {rooms.map(r => (
-                    <option key={r.id} value={r.id}>{r.number} {r.name}</option>
+                    <option key={r.id} value={r.id}>{formatRoomName(r)}</option>
                   ))}
                 </select>
               </div>

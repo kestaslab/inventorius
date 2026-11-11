@@ -1,5 +1,5 @@
 import QRCode from 'qrcode';
-import { InventoryItem, Room, Department } from '../types/inventory';
+import { InventoryItem, Room, Department, formatRoomName } from '../types/inventory';
 
 export interface BrotherPrintOptions {
   items: InventoryItem[];
@@ -69,7 +69,7 @@ export async function directPrintBrotherLabels(options: BrotherPrintOptions): Pr
   const labelPages = items.map((item) => {
     const qrUrl = qrMap[item.id] || '';
     const room = rooms.find(r => r.id === item.roomId);
-    const roomText = room ? `${room.number} kab.` : '';
+    const roomText = formatRoomName(room, true);
     const snText = item.serialNumber ? `SN: ${item.serialNumber}` : '';
 
     return `

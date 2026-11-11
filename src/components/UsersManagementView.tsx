@@ -25,7 +25,7 @@ import {
   X,
   Download
 } from 'lucide-react';
-import { User, UserRole, Department, Room, AuthSettings } from '../types/inventory';
+import { User, UserRole, Department, Room, AuthSettings, formatRoomName } from '../types/inventory';
 
 interface UsersManagementViewProps {
   users: User[];
@@ -170,7 +170,7 @@ Tomas Daukantas;tomas.d@tryskiumokykla.lt;Fizinio ugdymo mokytojas;teacher;S-01`
       if (rawRoom) {
         const found = rooms.find(
           (r) =>
-            r.number.toLowerCase() === rawRoom.toLowerCase() ||
+            (r.number && r.number.toLowerCase() === rawRoom.toLowerCase()) ||
             r.name.toLowerCase().includes(rawRoom.toLowerCase())
         );
         if (found) {
@@ -433,7 +433,7 @@ Tomas Daukantas;tomas.d@tryskiumokykla.lt;Fizinio ugdymo mokytojas;teacher;S-01`
                             {room ? (
                               <div className="font-semibold text-blue-900 flex items-center gap-1">
                                 <Building2 className="w-3.5 h-3.5 text-blue-600" />
-                                <span>{room.number} {room.name}</span>
+                                <span>{formatRoomName(room)}</span>
                               </div>
                             ) : (
                               <div className="text-slate-700 font-medium">{dept ? dept.name : '—'}</div>
