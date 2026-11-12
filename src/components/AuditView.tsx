@@ -284,7 +284,11 @@ export const AuditView: React.FC<AuditViewProps> = ({
                 <div className="flex items-center gap-1.5">
                   <Users className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                   <span>Komisijos nariai:</span>
-                  <span className="text-slate-700">{auditSession.committeeMembers.join(', ')}</span>
+                  <span className="text-slate-700">
+                    {auditSession.committeeMembers
+                      .filter(m => !m.toLowerCase().includes((activeChairmanDisplay.split(' ')[0] || '').toLowerCase()))
+                      .join(', ') || 'Nėra kitų narių'}
+                  </span>
                 </div>
               )}
 
@@ -308,7 +312,11 @@ export const AuditView: React.FC<AuditViewProps> = ({
                 setSessionYear(auditSession.year);
                 setOrderNumber(auditSession.orderNumber || 'V-14');
                 setOrderDate(auditSession.orderDate || new Date().toISOString().split('T')[0]);
-                setSelectedMemberNames(auditSession.committeeMembers || ['Sigita Navickienė']);
+                const currentChair = auditSession.committeeChairman || 'Kęstutis Labanauskas (IT Administratorius)';
+                setCustomChairmanName(currentChair);
+                const foundUser = users.find(u => currentChair.includes(u.fullName));
+                if (foundUser) setChairmanId(foundUser.id);
+                setSelectedMemberNames(auditSession.committeeMembers || []);
                 setIsSettingsOpen(true);
               }}
               className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg transition-colors cursor-pointer"
@@ -749,47 +757,138 @@ export const AuditView: React.FC<AuditViewProps> = ({
                 </div>
               </div>
 
-              {/* Commission Members Multi-select */}
-              <div className="space-y-2">
-                <label className="block text-xs font-bold text-slate-800 flex items-center justify-between">
-                  <span>Komisijos nariai ({selectedMemberNames.length})</span>
-                </label>
-                <div className="border border-slate-300 rounded-lg p-2.5 max-h-36 overflow-y-auto bg-slate-50 space-y-1">
-                  {users.map(u => {
-                    const isSelected = selectedMemberNames.includes(u.fullName);
-                    return (
-                      <label
-                        key={u.id}
-                        className={`flex items-center gap-2 p-1.5 rounded text-xs cursor-pointer ${
-                          isSelected ? 'bg-blue-100/70 font-semibold text-blue-900' : 'hover:bg-white text-slate-700'
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => {
-                            if (isSelected) {
-                              setSelectedMemberNames(prev => prev.filter(n => n !== u.fullName));
-                            } else {
-                              setSelectedMemberNames(prev => [...prev, u.fullName]);
-                            }
-                          }}
-                          className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                        />
-                        <span className="truncate">{u.fullName} ({u.roleTitle || 'Mokytojas'})</span>
-                      </label>
-                    );
-                  })}
+              {/* Commission Members Management */}
+              <div className="space-y-3 pt-2 border-t border-slate-200">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <Users className="w-4 h-4 text-blue-600" />
+                    <label className="block text-xs font-bold text-slate-800">
+                      Komisijos nariai ({selectedMemberNames.length})
+                    </label>
+                  </div>
+                  {selectedMemberNames.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedMemberNames([])}
+                      className="text-[11px] font-semibold text-rose-600 hover:text-rose-800 cursor-pointer"
+                    >
+                      Išvalyti visus narius
+                    </button>
+                  )}
                 </div>
 
-                {/* Add custom member */}
+                {/* Display all currently selected members with remove (X) buttons */}
+                <div className="space-y-1.5">
+                  <span className="text-[11px] font-medium text-slate-600 block">
+                    Priskirti komisijos nariai (spauskite [×] norėdami pašalinti):
+                  </span>
+                  {selectedMemberNames.length > 0 ? (
+                    <div className="flex flex-wrap gap-1.5 p-2.5 bg-blue-50/70 border border-blue-200 rounded-lg max-h-36 overflow-y-auto">
+                      {selectedMemberNames.map((name, idx) => (
+                        <span
+                          key={idx}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white border border-blue-300 rounded-md text-xs font-semibold text-slate-800 shadow-2xs"
+                        >
+                          <Users className="w-3 h-3 text-blue-600 shrink-0" />
+                          <span className="truncate max-w-[220px]" title={name}>{name}</span>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedMemberNames(prev => prev.filter((_, i) => i !== idx))}
+                            className="hover:bg-rose-100 text-slate-400 hover:text-rose-600 rounded p-0.5 transition-colors cursor-pointer ml-0.5"
+                            title="Pašalinti šį narį iš komisijos"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="p-3 bg-slate-50 border border-dashed border-slate-300 rounded-lg text-xs text-slate-500 text-center">
+                      Nėra priskirtų narių. Pasirinkite iš sąrašo žemiau arba įrašykite ranka.
+                    </div>
+                  )}
+                </div>
+
+                {/* Quick cleanup helper if old demo members exist */}
+                {selectedMemberNames.some(m => 
+                  m.includes('Dalia') || 
+                  m.includes('Saulius') || 
+                  m.includes('Komisijos pirmininkas')
+                ) && (
+                  <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-lg flex items-center justify-between text-xs text-amber-900">
+                    <span className="text-[11px] font-medium">Rasti seni demonstraciniai nariai arba pirmininko dublikatas</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedMemberNames(prev => prev.filter(m => 
+                          !m.includes('Dalia') && 
+                          !m.includes('Saulius') && 
+                          !m.includes('Komisijos pirmininkas')
+                        ));
+                      }}
+                      className="px-2 py-0.5 bg-amber-200 hover:bg-amber-300 text-amber-950 font-bold rounded text-[11px] cursor-pointer"
+                    >
+                      Pašalinti senus narius
+                    </button>
+                  </div>
+                )}
+
+                {/* Checkbox selector from active users */}
+                <div className="space-y-1">
+                  <span className="text-[11px] font-medium text-slate-600 block">
+                    Pasirinkti iš gimnazijos darbuotojų sąrašo:
+                  </span>
+                  <div className="border border-slate-300 rounded-lg p-2.5 max-h-36 overflow-y-auto bg-slate-50 space-y-1">
+                    {users.map(u => {
+                      const isSelected = selectedMemberNames.some(m => 
+                        m.toLowerCase().includes(u.fullName.toLowerCase())
+                      );
+                      return (
+                        <label
+                          key={u.id}
+                          className={`flex items-center gap-2 p-1.5 rounded text-xs cursor-pointer ${
+                            isSelected ? 'bg-blue-100/70 font-bold text-blue-950' : 'hover:bg-white text-slate-700'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => {
+                              if (isSelected) {
+                                setSelectedMemberNames(prev => prev.filter(m => 
+                                  !m.toLowerCase().includes(u.fullName.toLowerCase())
+                                ));
+                              } else {
+                                const roleSuffix = u.roleTitle ? ` (${u.roleTitle})` : '';
+                                setSelectedMemberNames(prev => [...prev, `${u.fullName}${roleSuffix}`]);
+                              }
+                            }}
+                            className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                          />
+                          <span className="truncate">{u.fullName} ({u.roleTitle || 'Mokytojas'})</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Add custom member input */}
                 <div className="flex gap-2">
                   <input
                     type="text"
                     value={newMemberInput}
                     onChange={(e) => setNewMemberInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        if (newMemberInput.trim() && !selectedMemberNames.includes(newMemberInput.trim())) {
+                          setSelectedMemberNames(prev => [...prev, newMemberInput.trim()]);
+                          setNewMemberInput('');
+                        }
+                      }
+                    }}
                     placeholder="Įrašyti papildomą narį ranka..."
-                    className="flex-1 px-3 py-1.5 border border-slate-300 rounded-md text-xs"
+                    className="flex-1 px-3 py-1.5 border border-slate-300 rounded-md text-xs focus:ring-1 focus:ring-blue-500 bg-white"
                   />
                   <button
                     type="button"

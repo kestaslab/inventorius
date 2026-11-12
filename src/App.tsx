@@ -348,10 +348,9 @@ export default function App() {
       actNumber,
       date: new Date().toISOString().slice(0, 10),
       status: 'draft',
-      committeeChair: 'Kęstutis Labanauskas (Ūkio dalies vedėjas)',
+      committeeChair: 'Kęstutis Labanauskas (Ūkio dalies vedėjas / IT)',
       committeeMembers: [
-        'Dalia Vaitkutė (Vyriausioji buhalterė)',
-        'Saulius Petrauskas (IT specialistas)',
+        'Sigita Navickienė (Direktoriaus pavaduotoja)',
       ],
       reasonCategory,
       notes,
