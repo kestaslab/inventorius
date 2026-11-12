@@ -23,9 +23,10 @@ import {
   FileSpreadsheet,
   Play,
   X,
-  Download
+  Download,
+  DoorClosed
 } from 'lucide-react';
-import { User, UserRole, Department, Room, AuthSettings, formatRoomName } from '../types/inventory';
+import { User, UserRole, Department, Room, AuthSettings, formatRoomName, getUserAssignedRoomIds } from '../types/inventory';
 
 interface UsersManagementViewProps {
   users: User[];
@@ -424,22 +425,36 @@ Tomas Daukantas;tomas.d@tryskiumokykla.lt;Fizinio ugdymo mokytojas;teacher;S-01`
                       )}
                     </td>
 
-                    {/* Department & Room */}
-                    <td className="py-2.5 px-3 whitespace-nowrap">
+                    {/* Department & Rooms */}
+                    <td className="py-2.5 px-3">
                       {(() => {
-                        const room = rooms.find((r) => r.id === u.assignedRoomId);
+                        const userRoomIds = getUserAssignedRoomIds(u);
+                        const assignedRooms = rooms.filter(r => userRoomIds.includes(r.id));
+
+                        if (assignedRooms.length === 0) {
+                          return (
+                            <div className="text-slate-600 font-medium text-xs">
+                              {dept ? dept.name : '—'}
+                              <div className="text-[10px] text-slate-400">Bendra atsakomybė</div>
+                            </div>
+                          );
+                        }
+
                         return (
-                          <div>
-                            {room ? (
-                              <div className="font-semibold text-blue-900 flex items-center gap-1">
-                                <Building2 className="w-3.5 h-3.5 text-blue-600" />
-                                <span>{formatRoomName(room)}</span>
-                              </div>
-                            ) : (
-                              <div className="text-slate-700 font-medium">{dept ? dept.name : '—'}</div>
-                            )}
-                            {room && dept && (
-                              <div className="text-[10px] text-slate-500">{dept.name}</div>
+                          <div className="space-y-1">
+                            <div className="flex flex-wrap items-center gap-1">
+                              {assignedRooms.map(r => (
+                                <span 
+                                  key={r.id}
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-semibold bg-blue-50 text-blue-900 border border-blue-200"
+                                >
+                                  <DoorClosed className="w-3 h-3 text-blue-600 shrink-0" />
+                                  <span>{formatRoomName(r)}</span>
+                                </span>
+                              ))}
+                            </div>
+                            {dept && (
+                              <div className="text-[10px] text-slate-400">{dept.name}</div>
                             )}
                           </div>
                         );

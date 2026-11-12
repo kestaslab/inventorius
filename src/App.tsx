@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Sidebar, NavigationTab } from './components/Sidebar';
 import { Header } from './components/Header';
 import { DashboardView } from './components/DashboardView';
 import { InventoryListView } from './components/InventoryListView';
+import { MyInventoryView } from './components/MyInventoryView';
 import { DepartmentsRoomsView } from './components/DepartmentsRoomsView';
 import { MovementsView } from './components/MovementsView';
 import { AuditView } from './components/AuditView';
@@ -18,6 +19,7 @@ import { UserModal } from './components/UserModal';
 import { LoginModal } from './components/LoginModal';
 import { LoginPortalView } from './components/LoginPortalView';
 import { AccessDeniedView } from './components/AccessDeniedView';
+import { ReportFaultModal } from './components/ReportFaultModal';
 
 import { 
   Department, 
@@ -27,7 +29,10 @@ import {
   MovementRecord, 
   WriteOffAct, 
   AuditSession,
-  AuthSettings 
+  AuthSettings,
+  DefectReport,
+  ItemCondition,
+  getUserAssignedRoomIds
 } from './types/inventory';
 import { StorageService } from './utils/storage';
 
@@ -67,6 +72,9 @@ export default function App() {
 
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
 
+  const [isFaultModalOpen, setIsFaultModalOpen] = useState(false);
+  const [faultTargetItem, setFaultTargetItem] = useState<InventoryItem | null>(null);
+
   const [labelsPreselectedIds, setLabelsPreselectedIds] = useState<string[]>([]);
 
   // Reload everything from storage (e.g. after JSON backup restore or reset)
@@ -94,10 +102,31 @@ export default function App() {
   const currentUser = users.find(u => u.id === activeUserId) || null;
   const activeAuditSession = auditSessions[0];
 
+  // Number of items assigned to the current user directly or located in their rooms
+  const myItemsCount = useMemo(() => {
+    if (!currentUser) return 0;
+    const userRoomIds = getUserAssignedRoomIds(currentUser);
+    return items.filter(i => 
+      i.responsibleUserId === currentUser.id ||
+      (i.roomId && userRoomIds.includes(i.roomId))
+    ).length;
+  }, [items, currentUser]);
+
+  // Teachers are strictly focused on "Mano inventorius" tab
+  useEffect(() => {
+    if (currentUser?.role === 'teacher' && currentTab !== 'my_inventory') {
+      setCurrentTab('my_inventory');
+    }
+  }, [currentUser?.role, currentTab]);
+
   // Active user switcher
   const handleChangeUser = (userId: string) => {
     setActiveUserId(userId);
     StorageService.setActiveUserId(userId);
+    const selected = users.find(u => u.id === userId);
+    if (selected?.role === 'teacher') {
+      setCurrentTab('my_inventory');
+    }
   };
 
   const handleLogout = () => {
@@ -371,6 +400,29 @@ export default function App() {
     StorageService.saveItems(updatedItems);
   };
 
+  // Defect / Fault Report Handler from teachers or staff
+  const handleSaveFaultReport = (itemToSave: InventoryItem, defectReport: DefectReport) => {
+    const updatedItems: InventoryItem[] = items.map(i => {
+      if (i.id === itemToSave.id) {
+        const existingReports = i.defectReports || [];
+        const updatedReports = [...existingReports, defectReport];
+        const defectNote = `[Gedimas ${new Date().toLocaleDateString('lt-LT')}]: ${defectReport.description}`;
+        const newCondition: ItemCondition = i.condition === 'new' ? 'fair' : (i.condition === 'good' ? 'fair' : 'poor');
+        return {
+          ...i,
+          status: 'in_repair',
+          condition: newCondition,
+          notes: i.notes ? `${i.notes} | ${defectNote}` : defectNote,
+          activeDefectNote: defectReport.description,
+          defectReports: updatedReports,
+        };
+      }
+      return i;
+    });
+    setItems(updatedItems);
+    StorageService.saveItems(updatedItems);
+  };
+
   // Save / Delete Department
   const handleSaveDepartment = (dept: Department) => {
     const exists = departments.some(d => d.id === dept.id);
@@ -595,6 +647,7 @@ export default function App() {
         allUsers={users}
         onChangeUser={handleChangeUser}
         itemsCount={items.length}
+        myItemsCount={myItemsCount}
         onOpenLoginModal={() => setIsLoginModalOpen(true)}
         onLogout={handleLogout}
       />
@@ -617,6 +670,20 @@ export default function App() {
         {/* View Content Viewport */}
         <main className="flex-1 overflow-y-auto p-6 md:p-8 bg-slate-100/90">
           <div className="max-w-7xl mx-auto">
+            {currentTab === 'my_inventory' && currentUser && (
+              <MyInventoryView
+                currentUser={currentUser}
+                items={items}
+                departments={departments}
+                rooms={rooms}
+                onViewItemDetail={(item) => {
+                  setDetailItem(item);
+                  setIsDetailModalOpen(true);
+                }}
+                onSaveFaultReport={handleSaveFaultReport}
+              />
+            )}
+
             {currentTab === 'dashboard' && (
               <DashboardView
                 items={items}
@@ -803,6 +870,30 @@ export default function App() {
           onWriteOff={(item) => {
             setWriteOffTargetItem(item);
             setIsWriteOffModalOpen(true);
+          }}
+          onReportFault={(item) => {
+            setFaultTargetItem(item);
+            setIsFaultModalOpen(true);
+          }}
+        />
+      )}
+
+      {isFaultModalOpen && faultTargetItem && (
+        <ReportFaultModal
+          isOpen={isFaultModalOpen}
+          onClose={() => {
+            setIsFaultModalOpen(false);
+            setFaultTargetItem(null);
+          }}
+          item={faultTargetItem}
+          room={rooms.find(r => r.id === faultTargetItem.roomId)}
+          dept={departments.find(d => d.id === faultTargetItem.departmentId)}
+          currentUserName={currentUser?.fullName || 'Naudotojas'}
+          currentUserId={currentUser?.id || ''}
+          onSubmitFault={(item: InventoryItem, report: DefectReport) => {
+            handleSaveFaultReport(item, report);
+            setIsFaultModalOpen(false);
+            setFaultTargetItem(null);
           }}
         />
       )}

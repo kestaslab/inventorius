@@ -23,7 +23,8 @@ import {
   Server,
   Tablet,
   Cpu,
-  HardDrive
+  HardDrive,
+  AlertTriangle
 } from 'lucide-react';
 import { 
   InventoryItem, 
@@ -52,6 +53,7 @@ interface ItemDetailModalProps {
   onEdit: (item: InventoryItem) => void;
   onTransfer: (item: InventoryItem) => void;
   onWriteOff: (item: InventoryItem) => void;
+  onReportFault?: (item: InventoryItem) => void;
 }
 
 export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
@@ -65,6 +67,7 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
   onEdit,
   onTransfer,
   onWriteOff,
+  onReportFault,
 }) => {
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [isCompressing, setIsCompressing] = useState(false);
@@ -520,6 +523,19 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
       {/* Bottom Actions (Pinned Footer) */}
       <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-3.5 border-t border-slate-100 bg-slate-50 shrink-0">
           <div className="flex items-center gap-2">
+            {item.status !== 'written_off' && onReportFault && (
+              <button
+                onClick={() => {
+                  onClose();
+                  onReportFault(item);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded cursor-pointer transition-colors shadow-2xs"
+              >
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-700" />
+                <span>Pranešti apie gedimą</span>
+              </button>
+            )}
+
             {canManage && item.status !== 'written_off' && (
               <>
                 <button

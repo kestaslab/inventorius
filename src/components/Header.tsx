@@ -23,6 +23,8 @@ export const Header: React.FC<HeaderProps> = ({
     switch (tab) {
       case 'dashboard':
         return { title: 'Bendra suvestinė', subtitle: 'Mokyklos turto ir materialinių vertybių apžvalga' };
+      case 'my_inventory':
+        return { title: 'Mano priskirtas inventorius', subtitle: 'Jūsų materialinei atsakomybei ir kabinetams priskirtas turtas bei gedimų registravimas' };
       case 'inventory':
         return { title: 'Inventoriaus registras', subtitle: 'Viso materialiojo turto sąrašas su filtrais ir būsenomis' };
       case 'departments':
@@ -72,14 +74,16 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Zone 2: Action Controls */}
       <div className="flex items-center gap-2.5 shrink-0">
-        <button
-          onClick={onExportCSV}
-          title="Atsisiųsti inventoriaus duomenis į Excel (CSV formatu)"
-          className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 hover:border-slate-400 transition-all whitespace-nowrap cursor-pointer shadow-xs"
-        >
-          <Download className="w-3.5 h-3.5 text-emerald-600" />
-          <span>Atsisiųsti Excel</span>
-        </button>
+        {canManage && (
+          <button
+            onClick={onExportCSV}
+            title="Atsisiųsti inventoriaus duomenis į Excel (CSV formatu)"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 hover:border-slate-400 transition-all whitespace-nowrap cursor-pointer shadow-xs"
+          >
+            <Download className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Atsisiųsti Excel</span>
+          </button>
+        )}
 
         {canManage && (
           <button

@@ -7,7 +7,8 @@ export interface User {
   role: UserRole;
   roleTitle: string; // e.g. "Ūkio dalies vedėjas", "Mokytojas", "IT administratorius"
   departmentId?: string;
-  assignedRoomId?: string; // Priskirtas konkretus kabinetas (pvz., 101 kab.)
+  assignedRoomId?: string; // Pirminis kabinetas (suderinamumui)
+  assignedRoomIds?: string[]; // Priskirti keli kabinetai / patalpos (pvz. kabinetas, sandėliukas, aktų salė)
   phone?: string;
   avatarUrl?: string;
   pinCode?: string; // 4-6 skaitmenų PIN greitam prisijungimui
@@ -15,6 +16,19 @@ export interface User {
   allowedGmail?: string; // jei skiriasi nuo darbinio el. pašto
   lastLoginAt?: string;
 }
+
+export const getUserAssignedRoomIds = (user?: User | null): string[] => {
+  if (!user) return [];
+  const set = new Set<string>();
+  if (Array.isArray(user.assignedRoomIds)) {
+    user.assignedRoomIds.forEach(id => { if (id) set.add(id); });
+  }
+  if (user.assignedRoomId) {
+    set.add(user.assignedRoomId);
+  }
+  return Array.from(set);
+};
+
 
 export interface AuthSettings {
   allowOnlyWhitelistedEmails: boolean; // ar leisti tik iš anksto patvirtintus el. paštus
@@ -125,6 +139,18 @@ export interface ComputerSpecs {
   macAddress?: string; // tinklo plokštės MAC adresas
 }
 
+export interface DefectReport {
+  id: string;
+  reportedAt: string; // ISO format
+  reportedByUserId: string;
+  reportedByUserName: string;
+  description: string;
+  severity: 'low' | 'medium' | 'high';
+  status: 'reported' | 'in_repair' | 'resolved';
+  photoUrl?: string;
+  resolutionNotes?: string;
+}
+
 export interface InventoryItem {
   id: string;
   inventoryNumber: string; // e.g. TM-2023-0042
@@ -151,6 +177,8 @@ export interface InventoryItem {
   writeOffActNumber?: string; // pvz., NUR-2025-01
   writeOffReason?: string;
   writeOffActId?: string;
+  defectReports?: DefectReport[]; // Gedimų pranešimų istorija
+  activeDefectNote?: string; // Aktyvaus gedimo santrauka
 }
 
 export interface MovementRecord {

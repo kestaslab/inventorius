@@ -12,19 +12,21 @@ import {
   School,
   Users,
   LogIn,
-  LogOut
+  LogOut,
+  PackageCheck
 } from 'lucide-react';
 import { User } from '../types/inventory';
 
 export type NavigationTab = 
   | 'dashboard' 
   | 'inventory' 
+  | 'my_inventory'
   | 'departments' 
   | 'movements' 
   | 'audit' 
   | 'labels' 
   | 'reports' 
-  | 'users'
+  | 'users' 
   | 'selfhost';
 
 interface SidebarProps {
@@ -34,6 +36,7 @@ interface SidebarProps {
   allUsers: User[];
   onChangeUser: (userId: string) => void;
   itemsCount: number;
+  myItemsCount?: number;
   onOpenLoginModal: () => void;
   onLogout: () => void;
 }
@@ -45,13 +48,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
   allUsers,
   onChangeUser,
   itemsCount,
+  myItemsCount,
   onOpenLoginModal,
   onLogout,
 }) => {
   const isPrivileged = currentUser.role === 'admin' || currentUser.role === 'manager';
+  const isTeacher = currentUser.role === 'teacher';
 
   const allNavItems: { id: NavigationTab; label: string; icon: React.ComponentType<{ className?: string }>; badge?: string | number }[] = [
     { id: 'dashboard', label: 'Suvestinė', icon: LayoutDashboard },
+    { id: 'my_inventory', label: 'Mano inventorius', icon: PackageCheck, badge: myItemsCount },
     { id: 'inventory', label: 'Inventoriaus sąrašas', icon: Boxes, badge: itemsCount },
     { id: 'departments', label: 'Skyriai ir kabinetai', icon: Building2 },
     { id: 'movements', label: 'Perkėlimo žurnalas', icon: ArrowLeftRight },
@@ -67,6 +73,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   ];
 
   const navItems = allNavItems.filter((item) => {
+    // Teachers only see their assigned inventory
+    if (isTeacher) {
+      return item.id === 'my_inventory';
+    }
+    // Auditor sees dashboard, inventory, audit, reports
+    if (currentUser.role === 'auditor') {
+      return item.id === 'dashboard' || item.id === 'inventory' || item.id === 'audit' || item.id === 'reports';
+    }
+    // Users & selfhost are privileged
     if (item.id === 'users' || item.id === 'selfhost') {
       return isPrivileged;
     }
