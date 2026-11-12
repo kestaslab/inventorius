@@ -773,6 +773,7 @@ export default function App() {
                 items={items}
                 departments={departments}
                 rooms={rooms}
+                users={users}
                 auditSession={activeAuditSession}
                 currentUser={currentUser}
                 onUpdateAuditSession={handleUpdateAuditSession}

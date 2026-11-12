@@ -213,10 +213,14 @@ export const INITIAL_AUDIT_SESSION: AuditSession = {
   title: '2026 m. gimnazijos materialiojo turto inventorizacija',
   status: 'in_progress',
   startDate: '2026-01-10',
-  departmentId: 'dept-1',
+  departmentId: undefined, // Bendra visai gimnazijai ir skyriams
+  committeeChairman: 'Kęstutis Labanauskas',
+  committeeChairmanId: 'usr-1',
+  committeeMembers: ['Sigita Navickienė'],
+  orderNumber: 'V-14',
+  orderDate: '2026-01-08',
   scannedItemIds: ['item-1', 'item-3'],
   missingItemIds: [],
   relocatedItemIds: [],
-  committeeMembers: ['Kęstutis Labanauskas', 'Sigita Navickienė'],
   notes: 'Planinė metinė patikra pagal VSĮ apskaitos reikalavimus',
 };

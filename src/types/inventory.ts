@@ -245,10 +245,14 @@ export interface AuditSession {
   startDate: string;
   completedDate?: string;
   departmentId?: string; // Optional: specific department or all
+  committeeChairman?: string; // Komisijos pirmininkas
+  committeeChairmanId?: string; // Pirmininko naudotojo ID
+  committeeMembers: string[]; // Kiti komisijos nariai
+  orderNumber?: string; // Direktoriaus įsakymo Nr. (pvz., V-14)
+  orderDate?: string; // Įsakymo data (pvz., 2026-03-01)
   scannedItemIds: string[];
   missingItemIds: string[];
   relocatedItemIds: string[];
-  committeeMembers: string[];
   notes?: string;
 }
 
