@@ -6,6 +6,8 @@ import {
   MovementRecord,
   WriteOffAct,
   AuditSession,
+  AuditCheckMethod,
+  AuditCheckRecord,
   AuthSettings,
   DefectReport,
   ItemCondition,
@@ -21,6 +23,7 @@ import {
   generateNextWriteOffActNumber,
   isWriteOffActNumberUnique,
 } from './writeOffUtils';
+import { buildAuditSnapshotItems, isItemInAuditScope } from './auditUtils';
 
 export type DbMutation =
   | { type: 'SAVE_ITEM'; item: InventoryItem }
@@ -102,10 +105,68 @@ export type DbMutation =
   | { type: 'UPDATE_AUTH_SETTINGS'; authSettings: AuthSettings }
   | { type: 'UPDATE_AUDIT_SESSION'; session: AuditSession }
   | {
+      type: 'CREATE_AUDIT_SESSION';
+      session: {
+        id: string;
+        year: number;
+        title: string;
+        startDate: string;
+        departmentId?: string;
+        includeInRepair?: boolean;
+        includeToWriteOff?: boolean;
+        committeeChairman?: string;
+        committeeChairmanId?: string;
+        committeeMembers: string[];
+        orderNumber?: string;
+        orderDate?: string;
+        notes?: string;
+      };
+    }
+  | {
+      type: 'UPDATE_AUDIT_SESSION_SETTINGS';
+      sessionId: string;
+      title: string;
+      year: number;
+      committeeChairman?: string;
+      committeeChairmanId?: string;
+      committeeMembers: string[];
+      orderNumber?: string;
+      orderDate?: string;
+      notes?: string;
+    }
+  | {
+      type: 'RECORD_AUDIT_CHECK';
+      sessionId: string;
+      itemId: string;
+      actualRoomId: string;
+      method: AuditCheckMethod;
+      checkedByUserId?: string;
+      checkedByUserName: string;
+      checkedAt?: string;
+      notes?: string;
+    }
+  | {
+      type: 'MARK_AUDIT_ITEM_MISSING';
+      sessionId: string;
+      itemId: string;
+      notes?: string;
+    }
+  | {
+      type: 'COMPLETE_AUDIT_SESSION';
+      sessionId: string;
+      completedDate: string;
+      completedByUserId?: string;
+      completedByUserName?: string;
+      notes?: string;
+    }
+  | {
       type: 'RELOCATE_AUDIT_ITEM';
       itemId: string;
       newRoomId: string;
       auditDate: string;
+      sessionId?: string;
+      transferredByUserId?: string;
+      transferredByUserName?: string;
     };
 
 export function getTouchedEntityKeys(db: AppDatabase, op: DbMutation): string[] {
@@ -225,8 +286,20 @@ export function getTouchedEntityKeys(db: AppDatabase, op: DbMutation): string[] 
       return ['authSettings'];
     case 'UPDATE_AUDIT_SESSION':
       return [`audit:${op.session.id}`];
+    case 'CREATE_AUDIT_SESSION':
+      return [`audit:${op.session.id}`, `audit_settings:${op.session.id}`];
+    case 'UPDATE_AUDIT_SESSION_SETTINGS':
+      return [`audit_settings:${op.sessionId}`];
+    case 'RECORD_AUDIT_CHECK':
+      return [`audit_check:${op.sessionId}:${op.itemId}`, `item:${op.itemId}`];
+    case 'MARK_AUDIT_ITEM_MISSING':
+      return [`audit_check:${op.sessionId}:${op.itemId}`];
+    case 'COMPLETE_AUDIT_SESSION':
+      return [`audit:${op.sessionId}`, `audit_settings:${op.sessionId}`];
     case 'RELOCATE_AUDIT_ITEM':
-      return [`item:${op.itemId}`];
+      return op.sessionId
+        ? [`item:${op.itemId}`, `audit_check:${op.sessionId}:${op.itemId}`]
+        : [`item:${op.itemId}`];
   }
 }
 
@@ -300,6 +373,23 @@ export function getOperationReferencedKeys(db: AppDatabase, op: DbMutation): str
     case 'RELOCATE_AUDIT_ITEM':
       keys.add(`item:${op.itemId}`);
       keys.add(`room:${op.newRoomId}`);
+      if (op.sessionId) keys.add(`audit:${op.sessionId}`);
+      break;
+    case 'RECORD_AUDIT_CHECK':
+      keys.add(`audit:${op.sessionId}`);
+      keys.add(`item:${op.itemId}`);
+      keys.add(`room:${op.actualRoomId}`);
+      break;
+    case 'MARK_AUDIT_ITEM_MISSING':
+      keys.add(`audit:${op.sessionId}`);
+      keys.add(`item:${op.itemId}`);
+      break;
+    case 'UPDATE_AUDIT_SESSION_SETTINGS':
+    case 'COMPLETE_AUDIT_SESSION':
+      keys.add(`audit:${op.sessionId}`);
+      break;
+    case 'CREATE_AUDIT_SESSION':
+      if (op.session.departmentId) keys.add(`department:${op.session.departmentId}`);
       break;
   }
 
@@ -1324,7 +1414,9 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
       const linkedRoomsCount = db.rooms.filter((r) => r.departmentId === op.departmentId).length;
       const linkedItemsCount = db.items.filter((i) => i.departmentId === op.departmentId).length;
       const linkedUsersCount = db.users.filter((u) => u.departmentId === op.departmentId).length;
-      const linkedAuditsCount = db.auditSessions.filter((s) => s.departmentId === op.departmentId).length;
+      const linkedAuditsCount = db.auditSessions.filter(
+        (s) => s.status !== 'completed' && s.departmentId === op.departmentId
+      ).length;
 
       if (linkedRoomsCount > 0 || linkedItemsCount > 0 || linkedUsersCount > 0 || linkedAuditsCount > 0) {
         return {
@@ -1335,10 +1427,15 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
       }
 
       const movements = backfillMovementSnapshots(db.movements, db.departments, db.rooms, db.users);
+      const auditSessions = db.auditSessions.map((s) =>
+        s.status === 'completed' && s.departmentId === op.departmentId && !s.scopeDepartmentName
+          ? { ...s, scopeDepartmentName: targetDept.name }
+          : s
+      );
       const departments = db.departments.filter((d) => d.id !== op.departmentId);
       return {
         ok: true,
-        database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, departments, movements },
+        database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, departments, movements, auditSessions },
       };
     }
 
@@ -1398,9 +1495,13 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
       const users = db.users.map((u) =>
         u.departmentId === op.departmentId ? { ...u, departmentId: op.targetDepartmentId } : u
       );
-      const auditSessions = db.auditSessions.map((s) =>
-        s.departmentId === op.departmentId ? { ...s, departmentId: op.targetDepartmentId } : s
-      );
+      const auditSessions = db.auditSessions.map((s) => {
+        if (s.departmentId !== op.departmentId) return s;
+        if (s.status === 'completed') {
+          return s.scopeDepartmentName ? s : { ...s, scopeDepartmentName: sourceDept.name };
+        }
+        return { ...s, departmentId: op.targetDepartmentId, scopeDepartmentName: targetDept.name };
+      });
       const departments = db.departments.filter((d) => d.id !== op.departmentId);
 
       return {
@@ -1792,8 +1893,15 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
     }
 
     case 'UPDATE_AUDIT_SESSION': {
-      const exists = db.auditSessions.some((s) => s.id === op.session.id);
-      const auditSessions = exists
+      const existing = db.auditSessions.find((s) => s.id === op.session.id);
+      if (existing?.status === 'completed') {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'Užbaigtos inventorizacijos sesijos rezultatų negalima tyliai redaguoti.',
+        };
+      }
+      const auditSessions = existing
         ? db.auditSessions.map((s) => (s.id === op.session.id ? op.session : s))
         : [op.session, ...db.auditSessions];
       return {
@@ -1802,10 +1910,374 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
       };
     }
 
-    case 'RELOCATE_AUDIT_ITEM': {
+    case 'CREATE_AUDIT_SESSION': {
+      const trimmedTitle = op.session.title?.trim();
+      if (!trimmedTitle) {
+        return { ok: false, statusCode: 400, error: 'Inventorizacijos pavadinimas yra privalomas.' };
+      }
+      if (!Number.isFinite(op.session.year) || op.session.year < 2000 || op.session.year > 2100) {
+        return { ok: false, statusCode: 400, error: 'Nurodyti neteisingi inventorizacijos metai.' };
+      }
+      if (db.auditSessions.some((s) => s.id === op.session.id)) {
+        return { ok: false, statusCode: 409, error: 'Sesija su tokiu ID jau egzistuoja.' };
+      }
+      let scopeDeptName = 'Visi skyriai (visa gimnazija)';
+      if (op.session.departmentId) {
+        const dept = db.departments.find((d) => d.id === op.session.departmentId);
+        if (!dept) {
+          return { ok: false, statusCode: 404, error: 'Pasirinktas skyrius nerastas.' };
+        }
+        scopeDeptName = dept.name;
+      }
+
+      const includeInRepair = op.session.includeInRepair ?? true;
+      const includeToWriteOff = op.session.includeToWriteOff ?? true;
+      const snapshotItems = buildAuditSnapshotItems(db, {
+        departmentId: op.session.departmentId,
+        includeInRepair,
+        includeToWriteOff,
+      });
+
+      const created: AuditSession = {
+        id: op.session.id,
+        year: op.session.year,
+        title: trimmedTitle,
+        status: 'in_progress',
+        startDate: op.session.startDate || todayStr,
+        ...(op.session.departmentId ? { departmentId: op.session.departmentId } : {}),
+        scopeDepartmentName: scopeDeptName,
+        includeInRepair,
+        includeToWriteOff,
+        committeeChairman: op.session.committeeChairman,
+        committeeChairmanId: op.session.committeeChairmanId,
+        committeeMembers: op.session.committeeMembers || [],
+        orderNumber: op.session.orderNumber,
+        orderDate: op.session.orderDate,
+        notes: op.session.notes,
+        scannedItemIds: [],
+        missingItemIds: [],
+        relocatedItemIds: [],
+        snapshotItems,
+        checkRecords: {},
+      };
+
+      return {
+        ok: true,
+        database: {
+          ...db,
+          version: CURRENT_DB_VERSION,
+          exportedAt: nowIso,
+          auditSessions: [created, ...db.auditSessions],
+        },
+      };
+    }
+
+    case 'UPDATE_AUDIT_SESSION_SETTINGS': {
+      const target = db.auditSessions.find((s) => s.id === op.sessionId);
+      if (!target) {
+        return { ok: false, statusCode: 404, error: 'Inventorizacijos sesija nerasta.' };
+      }
+      if (target.status === 'completed') {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'Užbaigtos inventorizacijos sesijos nustatymų keisti negalima.',
+        };
+      }
+      const trimmedTitle = op.title?.trim();
+      if (!trimmedTitle) {
+        return { ok: false, statusCode: 400, error: 'Inventorizacijos pavadinimas negali būti tuščias.' };
+      }
+
+      const auditSessions = db.auditSessions.map((s) =>
+        s.id === op.sessionId
+          ? {
+              ...s,
+              title: trimmedTitle,
+              year: op.year,
+              committeeChairman: op.committeeChairman,
+              committeeChairmanId: op.committeeChairmanId,
+              committeeMembers: op.committeeMembers,
+              orderNumber: op.orderNumber,
+              orderDate: op.orderDate,
+              notes: op.notes,
+            }
+          : s
+      );
+      return {
+        ok: true,
+        database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, auditSessions },
+      };
+    }
+
+    case 'RECORD_AUDIT_CHECK': {
+      const session = db.auditSessions.find((s) => s.id === op.sessionId);
+      if (!session) {
+        return { ok: false, statusCode: 404, error: 'Inventorizacijos sesija nerasta.' };
+      }
+      if (session.status === 'completed') {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'Užbaigtoje inventorizacijos sesijoje naujų patikrinimų registruoti negalima.',
+        };
+      }
+
       const targetItem = db.items.find((i) => i.id === op.itemId);
       if (!targetItem) {
         return { ok: false, statusCode: 404, error: 'Turtas nerastas.' };
+      }
+      if (targetItem.status === 'written_off') {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: `Turtas [${targetItem.inventoryNumber}] yra nurašytas ir neįtraukiamas į aktyvaus turto inventorizaciją.`,
+        };
+      }
+
+      const actualRoom = db.rooms.find((r) => r.id === op.actualRoomId);
+      if (!actualRoom) {
+        return { ok: false, statusCode: 404, error: 'Nurodytas tikrinimo kabinetas nerastas.' };
+      }
+
+      const snapMatch = session.snapshotItems?.find((s) => s.itemId === op.itemId);
+      const expectedDeptId = snapMatch?.expectedDepartmentId || targetItem.departmentId;
+      const expectedRoomId = snapMatch?.expectedRoomId || targetItem.roomId;
+
+      if (
+        session.departmentId &&
+        expectedDeptId !== session.departmentId &&
+        actualRoom.departmentId !== session.departmentId
+      ) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: `Turtas [${targetItem.inventoryNumber}] nepriklauso pasirinktai šios inventorizacijos skyriaus apimčiai.`,
+        };
+      }
+
+      const expectedRoom = db.rooms.find((r) => r.id === expectedRoomId);
+      const expectedRoomName = snapMatch?.expectedRoomName || formatRoomName(expectedRoom, true);
+      const actualRoomName = formatRoomName(actualRoom, true);
+      const outcome = expectedRoomId === actualRoom.id ? 'found' : 'found_elsewhere';
+      const checkedAt = op.checkedAt || nowIso;
+      const auditDateOnly = checkedAt.slice(0, 10);
+
+      const existingRecord = session.checkRecords?.[op.itemId];
+      const nextRecord: AuditCheckRecord = {
+        itemId: op.itemId,
+        outcome,
+        method: op.method,
+        checkedAt,
+        ...(op.checkedByUserId ? { checkedByUserId: op.checkedByUserId } : {}),
+        checkedByUserName: op.checkedByUserName || 'Komisijos narys',
+        expectedDepartmentId: expectedDeptId,
+        expectedRoomId,
+        expectedRoomName,
+        actualDepartmentId: actualRoom.departmentId,
+        actualRoomId: actualRoom.id,
+        actualRoomName,
+        ...(existingRecord?.officialTransferDone
+          ? {
+              officialTransferDone: existingRecord.officialTransferDone,
+              officialMovementId: existingRecord.officialMovementId,
+              officialTransferredAt: existingRecord.officialTransferredAt,
+              officialTransferredByName: existingRecord.officialTransferredByName,
+            }
+          : {}),
+        ...(op.notes ? { notes: op.notes } : existingRecord?.notes ? { notes: existingRecord.notes } : {}),
+      };
+
+      const auditSessions = db.auditSessions.map((s) => {
+        if (s.id !== op.sessionId) return s;
+        const scannedItemIds = s.scannedItemIds.includes(op.itemId)
+          ? s.scannedItemIds
+          : [...s.scannedItemIds, op.itemId];
+        const missingItemIds = s.missingItemIds.filter((id) => id !== op.itemId);
+        const relocatedItemIds =
+          outcome === 'found_elsewhere' || existingRecord?.officialTransferDone
+            ? s.relocatedItemIds.includes(op.itemId)
+              ? s.relocatedItemIds
+              : [...s.relocatedItemIds, op.itemId]
+            : s.relocatedItemIds.filter((id) => id !== op.itemId);
+
+        return {
+          ...s,
+          scannedItemIds,
+          missingItemIds,
+          relocatedItemIds,
+          checkRecords: {
+            ...(s.checkRecords || {}),
+            [op.itemId]: nextRecord,
+          },
+        };
+      });
+
+      // Atnaujiname TIK daikto lastAuditDate – registro vietos (roomId/departmentId) NEKEIČIAME automatiškai!
+      const items = db.items.map((i) =>
+        i.id === op.itemId ? { ...i, lastAuditDate: auditDateOnly } : i
+      );
+
+      return {
+        ok: true,
+        database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, auditSessions, items },
+      };
+    }
+
+    case 'MARK_AUDIT_ITEM_MISSING': {
+      const session = db.auditSessions.find((s) => s.id === op.sessionId);
+      if (!session) {
+        return { ok: false, statusCode: 404, error: 'Inventorizacijos sesija nerasta.' };
+      }
+      if (session.status === 'completed') {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'Užbaigtos inventorizacijos sesijos rezultatų keisti negalima.',
+        };
+      }
+      if (session.checkRecords?.[op.itemId] || session.scannedItemIds.includes(op.itemId)) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'Šis turtas šioje sesijoje jau užfiksuotas kaip rastas.',
+        };
+      }
+      const auditSessions = db.auditSessions.map((s) =>
+        s.id === op.sessionId
+          ? {
+              ...s,
+              missingItemIds: s.missingItemIds.includes(op.itemId)
+                ? s.missingItemIds
+                : [...s.missingItemIds, op.itemId],
+            }
+          : s
+      );
+      return {
+        ok: true,
+        database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, auditSessions },
+      };
+    }
+
+    case 'COMPLETE_AUDIT_SESSION': {
+      const session = db.auditSessions.find((s) => s.id === op.sessionId);
+      if (!session) {
+        return { ok: false, statusCode: 404, error: 'Inventorizacijos sesija nerasta.' };
+      }
+      if (session.status === 'completed') {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'Ši inventorizacijos sesija jau yra užbaigta.',
+        };
+      }
+
+      const frozenSnapshot =
+        session.snapshotItems ??
+        (() => {
+          const scopeItems = db.items.filter(
+            (item) =>
+              isItemInAuditScope(item, {
+                departmentId: session.departmentId,
+                includeInRepair: session.includeInRepair,
+                includeToWriteOff: session.includeToWriteOff,
+              }) ||
+              session.scannedItemIds.includes(item.id) ||
+              session.missingItemIds.includes(item.id)
+          );
+          return buildAuditSnapshotItems(
+            { items: scopeItems, departments: db.departments, rooms: db.rooms, users: db.users },
+            {}
+          );
+        })();
+
+      const checkRecords = session.checkRecords || {};
+      const scannedSet = new Set(session.scannedItemIds || []);
+      const missingSet = new Set(session.missingItemIds || []);
+      const relocatedSet = new Set(session.relocatedItemIds || []);
+
+      let foundInPlaceCount = 0;
+      let foundElsewhereCount = 0;
+      const finalMissingIds = new Set(missingSet);
+
+      for (const snap of frozenSnapshot) {
+        const rec = checkRecords[snap.itemId];
+        if (rec) {
+          finalMissingIds.delete(snap.itemId);
+          if (rec.outcome === 'found_elsewhere') foundElsewhereCount++;
+          else foundInPlaceCount++;
+        } else if (relocatedSet.has(snap.itemId)) {
+          finalMissingIds.delete(snap.itemId);
+          foundElsewhereCount++;
+        } else if (scannedSet.has(snap.itemId)) {
+          finalMissingIds.delete(snap.itemId);
+          foundInPlaceCount++;
+        } else {
+          finalMissingIds.add(snap.itemId);
+        }
+      }
+
+      // Taip pat suskaičiuojame kito skyriaus daiktus, jei buvo patikrinti sesijos patalpose
+      const snapIds = new Set(frozenSnapshot.map((s) => s.itemId));
+      for (const [id, rec] of Object.entries(checkRecords)) {
+        if (!snapIds.has(id)) {
+          if (rec.outcome === 'found_elsewhere') foundElsewhereCount++;
+          else foundInPlaceCount++;
+        }
+      }
+
+      const auditSessions = db.auditSessions.map((s) =>
+        s.id === op.sessionId
+          ? {
+              ...s,
+              status: 'completed' as const,
+              completedDate: op.completedDate || todayStr,
+              ...(op.completedByUserId ? { completedByUserId: op.completedByUserId } : {}),
+              ...(op.completedByUserName ? { completedByUserName: op.completedByUserName } : {}),
+              snapshotItems: frozenSnapshot,
+              missingItemIds: Array.from(finalMissingIds),
+              completionSummary: {
+                totalExpected: frozenSnapshot.length,
+                foundInPlaceCount,
+                foundElsewhereCount,
+                missingCount: finalMissingIds.size,
+              },
+              ...(op.notes !== undefined ? { notes: op.notes } : {}),
+            }
+          : s
+      );
+
+      return {
+        ok: true,
+        database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, auditSessions },
+      };
+    }
+
+    case 'RELOCATE_AUDIT_ITEM': {
+      if (op.sessionId) {
+        const session = db.auditSessions.find((s) => s.id === op.sessionId);
+        if (!session) {
+          return { ok: false, statusCode: 404, error: 'Inventorizacijos sesija nerasta.' };
+        }
+        if (session.status === 'completed') {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: 'Užbaigtoje inventorizacijos sesijoje turto perkėlimo registruoti negalima.',
+          };
+        }
+      }
+
+      const targetItem = db.items.find((i) => i.id === op.itemId);
+      if (!targetItem) {
+        return { ok: false, statusCode: 404, error: 'Turtas nerastas.' };
+      }
+      if (targetItem.status === 'written_off') {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'Negalima perkelti jau nurašyto turto.',
+        };
       }
       const targetRoom = db.rooms.find((r) => r.id === op.newRoomId);
       if (!targetRoom) {
@@ -1814,6 +2286,7 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
       const nextResponsibleUserId =
         targetRoom.defaultResponsiblePersonId || targetItem.responsibleUserId;
       let movements = db.movements;
+      let createdMovementId: string | undefined;
 
       if (
         targetItem.roomId !== op.newRoomId ||
@@ -1828,8 +2301,9 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
           toDepartmentId: targetRoom.departmentId,
           toRoomId: op.newRoomId,
           toUserId: nextResponsibleUserId,
-          reason: `Perkėlimas užfiksuotas inventorizacijos patikros metu (${op.auditDate})`,
+          reason: `Oficialus perkėlimas po inventorizacijos patikros (${op.auditDate})`,
         });
+        createdMovementId = mov.id;
         movements = [mov, ...db.movements];
       }
 
@@ -1844,9 +2318,72 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
             }
           : i
       );
+
+      let auditSessions = db.auditSessions;
+      if (op.sessionId) {
+        auditSessions = db.auditSessions.map((s) => {
+          if (s.id !== op.sessionId) return s;
+          const prevRec = s.checkRecords?.[op.itemId];
+          const snapMatch = s.snapshotItems?.find((sn) => sn.itemId === op.itemId);
+          const expectedDeptId =
+            prevRec?.expectedDepartmentId || snapMatch?.expectedDepartmentId || targetItem.departmentId;
+          const expectedRoomId =
+            prevRec?.expectedRoomId || snapMatch?.expectedRoomId || targetItem.roomId;
+          const expectedRoom = db.rooms.find((r) => r.id === expectedRoomId);
+
+          const updatedRec: AuditCheckRecord = {
+            itemId: op.itemId,
+            outcome: expectedRoomId === targetRoom.id ? 'found' : 'found_elsewhere',
+            method: prevRec?.method || 'qr',
+            checkedAt: prevRec?.checkedAt || nowIso,
+            checkedByUserId: prevRec?.checkedByUserId || op.transferredByUserId,
+            checkedByUserName:
+              prevRec?.checkedByUserName || op.transferredByUserName || 'Komisijos narys',
+            expectedDepartmentId: expectedDeptId,
+            expectedRoomId,
+            expectedRoomName:
+              prevRec?.expectedRoomName ||
+              snapMatch?.expectedRoomName ||
+              formatRoomName(expectedRoom, true),
+            actualDepartmentId: targetRoom.departmentId,
+            actualRoomId: targetRoom.id,
+            actualRoomName: formatRoomName(targetRoom, true),
+            officialTransferDone: true,
+            ...(createdMovementId ? { officialMovementId: createdMovementId } : {}),
+            officialTransferredAt: nowIso,
+            ...(op.transferredByUserName
+              ? { officialTransferredByName: op.transferredByUserName }
+              : {}),
+            ...(prevRec?.notes ? { notes: prevRec.notes } : {}),
+          };
+
+          return {
+            ...s,
+            scannedItemIds: s.scannedItemIds.includes(op.itemId)
+              ? s.scannedItemIds
+              : [...s.scannedItemIds, op.itemId],
+            missingItemIds: s.missingItemIds.filter((id) => id !== op.itemId),
+            relocatedItemIds: s.relocatedItemIds.includes(op.itemId)
+              ? s.relocatedItemIds
+              : [...s.relocatedItemIds, op.itemId],
+            checkRecords: {
+              ...(s.checkRecords || {}),
+              [op.itemId]: updatedRec,
+            },
+          };
+        });
+      }
+
       return {
         ok: true,
-        database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, items, movements },
+        database: {
+          ...db,
+          version: CURRENT_DB_VERSION,
+          exportedAt: nowIso,
+          items,
+          movements,
+          auditSessions,
+        },
       };
     }
   }

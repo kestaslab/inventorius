@@ -47,14 +47,34 @@
   - `TRANSFER_AND_DELETE_USER` perkelia aktyvų turtą, skyrių/kabinetų atsakomybę bei vykdomas (`in_progress`) inventorizacijas, bet nekeičia jau užbaigtų (`completed`) inventorizacijų istorinio komisijos pirmininko.
   - `DELETE_USER` leidžia pašalinti darbuotoją, jei jam priskirtos tik jau užbaigtos inventorizacijos, išsaugodamas istorinę pirmininko momentinę kopiją.
 
+### 4 etapas – Inventorizacija ir QR (Atlikta)
+- **QR turinio suderinamumas ir dekodavimas (`src/utils/qrUtils.ts`, `src/components/LabelsQRView.tsx`, `src/utils/brotherPrinter.ts`):**
+  - Etikečių spausdinimas ir QR skaitytuvas naudoja bendrą `buildItemQrPayload` / `resolveScannedInventoryItem` formatą (`{ inv, name, school }`).
+  - Palaikomi visi įvesties variantai: programos JSON QR kodai, CSV eksporto eilutės (`INV | Pavadinimas | Mokykla`), paprastas inventorinis numeris, serijos numeris, brūkšninis kodas ir vidinis ID.
+  - Sugadintas JSON ar nežinomas kodas niekada nesukelia programos klaidos ir pateikia aiškų lietuvišką pranešimą.
+- **Realus telefono kameros QR skaitytuvas (`src/components/AuditCameraScanner.tsx`):**
+  - Naudojama `jsqr` (ir `BarcodeDetector` jei palaiko naršyklė) per `navigator.mediaDevices.getUserMedia` su galinės kameros pirmenybe (`facingMode: { ideal: 'environment' }`) ir kameros perjungikliu, kai įrenginyje yra kelios kameros.
+  - Apdorojamos leidimų atmetimo, nerastos kameros, užimtos kameros ir nesaugaus ryšio (`HTTPS`) klaidos su aiškiomis lietuviškomis instrukcijomis.
+  - Garantinis kameros srauto ir `requestAnimationFrame` sustabdymas uždarius skaitytuvą ar išėjus iš ekrano (`useEffect` cleanup).
+  - Apsauga nuo pakartotinių to paties kodo skenavimų (2,5 s pauzė) ir nuo lygiagrečių mutacijų lenktynių (`scanInFlightRef`).
+- **Inventorizacijos sesijų gyvavimo ciklas ir momentinis sąrašas (`src/utils/auditUtils.ts`, `src/utils/dbOperations.ts`, `src/components/AuditView.tsx`, `src/components/DashboardView.tsx`):**
+  - Galimybė sukurti naują atskirą sesiją (`CREATE_AUDIT_SESSION`) pasirinkus apimtį (visi skyriai arba konkretus skyrius, remontuojamo / nurašomo turto įtraukimas; **`written_off` turtas pagal nutylėjimą visada neįtraukiamas**).
+  - Nauja sesija pradedama švariai be senų patikrinimų žymėjimų, o sesijos pradžioje užfiksuojamas momentinis sąrašas (`snapshotItems`).
+  - Aiškiai atskirta **„Dar nepatikrinta“** (`unchecked`) nuo **„Trūksta“** (`missing`), fiksuojama kas, kada, kur ir kokiu būdu (`qr`, `barcode`, `manual_code`, `manual_list`) patikrino daiktą, ir atnaujinama daikto `lastAuditDate`.
+  - Kitame kabinete rasto turto fiksavimas (`found_elsewhere`) automatiškai nekeičia jo oficialios registro vietos – komisijai pateikiami du aiškūs veiksmai: užfiksuoti faktinę vietą čia arba oficialiai perkelti su judėjimo aktu (`RELOCATE_AUDIT_ITEM`).
+  - Užbaigiant sesiją (`COMPLETE_AUDIT_SESSION`) rodomas patvirtinimo langas su santrauka; užbaigta sesija užrakinama nuo tylių pakeitimų, o vėlesni registro pakeitimai ar pervadinimai neperrašo užbaigtos sesijos apyrašo rezultatų.
+  - Kiekvienas patikrinimas siunčiamas atomine operacija (`RECORD_AUDIT_CHECK`) su daikto lygio raktu `audit_check:<sessionId>:<itemId>`, todėl keli lygiagrečiai skenuojantys komisijos nariai neperrašo vienas kito rezultatų.
+  - Tuščia bazė, tuščias sesijų sąrašas ar 0 daiktų sesija saugiai atvaizduojama be klaidų ir be `NaN%`.
+- **Suderinamumas su senomis JSON kopijomis (`src/utils/databaseValidation.ts`):**
+  - Senos `1.0.0` / `1.1.0` kopijos be `snapshotItems` ir `checkRecords` importuojamos ir peržiūrimos be klaidų, neišgalvojant nesančių istorinių laikų ar autorių.
+
 ### Patikrų rezultatai
-- `tests/stage1-storage.test.ts`, `tests/stage2-editing-relations.test.ts`, `tests/stage3-writeoff-restore.test.ts`, `tests/stage3-queue-and-history.test.ts` – vykdomi su `npx tsx --test`.
+- `tests/stage1-storage.test.ts`, `tests/stage2-editing-relations.test.ts`, `tests/stage3-writeoff-restore.test.ts`, `tests/stage3-queue-and-history.test.ts`, `tests/stage4-audit-qr.test.ts` – vykdomi su `npx tsx --test`.
 
 ---
 
 ## Likę etapai
 
-- 4 – inventorizacija ir QR
 - 5 – ataskaitos ir suvestinės
 - 6 – gedimai, etiketės ir darbuotojų importas
 - 7 – diegimas ir galutinė patikra

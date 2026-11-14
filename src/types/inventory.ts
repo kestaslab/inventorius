@@ -288,6 +288,54 @@ export interface TransferAct {
   }[];
 }
 
+export type AuditCheckMethod = 'qr' | 'barcode' | 'manual_code' | 'manual_list';
+export type AuditCheckOutcome = 'found' | 'found_elsewhere';
+
+export interface AuditSnapshotItem {
+  itemId: string;
+  inventoryNumber: string;
+  serialNumber?: string;
+  name: string;
+  category: ItemCategory;
+  expectedDepartmentId: string;
+  expectedDepartmentName: string;
+  expectedDepartmentCode?: string;
+  expectedRoomId: string;
+  expectedRoomName: string;
+  responsibleUserId: string;
+  responsibleUserName: string;
+  purchasePrice: number;
+  residualValue?: number;
+  statusAtStart: ItemStatus;
+}
+
+export interface AuditCheckRecord {
+  itemId: string;
+  outcome: AuditCheckOutcome;
+  method: AuditCheckMethod;
+  checkedAt: string; // ISO datetime
+  checkedByUserId?: string;
+  checkedByUserName: string;
+  expectedDepartmentId: string;
+  expectedRoomId: string;
+  expectedRoomName?: string;
+  actualDepartmentId: string;
+  actualRoomId: string;
+  actualRoomName?: string;
+  officialTransferDone?: boolean;
+  officialMovementId?: string;
+  officialTransferredAt?: string;
+  officialTransferredByName?: string;
+  notes?: string;
+}
+
+export interface AuditCompletionSummary {
+  totalExpected: number;
+  foundInPlaceCount: number;
+  foundElsewhereCount: number;
+  missingCount: number;
+}
+
 export interface AuditSession {
   id: string;
   year: number;
@@ -295,7 +343,12 @@ export interface AuditSession {
   status: 'in_progress' | 'completed';
   startDate: string;
   completedDate?: string;
+  completedByUserId?: string;
+  completedByUserName?: string;
   departmentId?: string; // Optional: specific department or all
+  scopeDepartmentName?: string; // Snapshot pavadinimas istorijai
+  includeInRepair?: boolean;
+  includeToWriteOff?: boolean;
   committeeChairman?: string; // Komisijos pirmininkas
   committeeChairmanId?: string; // Pirmininko naudotojo ID
   committeeMembers: string[]; // Kiti komisijos nariai
@@ -304,6 +357,9 @@ export interface AuditSession {
   scannedItemIds: string[];
   missingItemIds: string[];
   relocatedItemIds: string[];
+  snapshotItems?: AuditSnapshotItem[]; // Sesijos pradžioje užfiksuotas tikrinamų objektų sąrašas
+  checkRecords?: Record<string, AuditCheckRecord>; // Atskiri patikrinimų įrašai pagal itemId
+  completionSummary?: AuditCompletionSummary;
   notes?: string;
 }
 

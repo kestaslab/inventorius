@@ -30,6 +30,7 @@ import {
   MovementRecord, 
   WriteOffAct, 
   AuditSession,
+  AuditCheckMethod,
   AuthSettings,
   DefectReport,
   ItemCondition,
@@ -61,6 +62,18 @@ function describePendingMutation(op: DbMutation): string {
       return `Kabinetas „${op.room.name}“`;
     case 'SAVE_USER':
       return `Naudotojas „${op.user.fullName}“`;
+    case 'CREATE_AUDIT_SESSION':
+      return `Nauja inventorizacija „${op.session.title}“`;
+    case 'UPDATE_AUDIT_SESSION_SETTINGS':
+      return `Inventorizacijos nustatymai (${op.sessionId})`;
+    case 'RECORD_AUDIT_CHECK':
+      return `Inventorizacijos patikra (${op.itemId})`;
+    case 'MARK_AUDIT_ITEM_MISSING':
+      return `Trūkumo fiksavimas (${op.itemId})`;
+    case 'COMPLETE_AUDIT_SESSION':
+      return `Inventorizacijos užbaigimas (${op.sessionId})`;
+    case 'RELOCATE_AUDIT_ITEM':
+      return `Turto perkėlimas inventorizacijoje (${op.itemId})`;
     default:
       return `Operacija ${op.type}`;
   }
@@ -179,7 +192,7 @@ export default function App() {
   }, []);
 
   const currentUser = users.find(u => u.id === activeUserId) || null;
-  const activeAuditSession = auditSessions[0];
+  const activeAuditSession = auditSessions.find(s => s.status === 'in_progress') || auditSessions[0];
 
   // Number of items assigned to the current user directly or located in their rooms
   const myItemsCount = useMemo(() => {
@@ -365,20 +378,107 @@ export default function App() {
     });
   };
 
-  // Audit Session update
-  const handleUpdateAuditSession = (updatedSession: AuditSession) => {
-    void runMutation({ type: 'UPDATE_AUDIT_SESSION', session: updatedSession });
+  // Audit Session Lifecycle & Check Handlers
+  const handleCreateAuditSession = async (session: {
+    id: string;
+    year: number;
+    title: string;
+    startDate: string;
+    departmentId?: string;
+    includeInRepair?: boolean;
+    includeToWriteOff?: boolean;
+    committeeChairman?: string;
+    committeeChairmanId?: string;
+    committeeMembers: string[];
+    orderNumber?: string;
+    orderDate?: string;
+    notes?: string;
+  }) => {
+    const res = await runMutation({ type: 'CREATE_AUDIT_SESSION', session });
+    return { ok: res.ok, error: res.error };
   };
 
-  // Relocate Item during physical audit
-  const handleRelocateItem = (itemId: string, newRoomId: string) => {
-    if (!rooms.some(r => r.id === newRoomId)) return;
-    void runMutation({
+  const handleUpdateAuditSessionSettings = async (payload: {
+    sessionId: string;
+    title: string;
+    year: number;
+    committeeChairman?: string;
+    committeeChairmanId?: string;
+    committeeMembers: string[];
+    orderNumber?: string;
+    orderDate?: string;
+    notes?: string;
+  }) => {
+    const res = await runMutation({ type: 'UPDATE_AUDIT_SESSION_SETTINGS', ...payload });
+    return { ok: res.ok, error: res.error };
+  };
+
+  const handleRecordAuditCheck = async (payload: {
+    sessionId: string;
+    itemId: string;
+    actualRoomId: string;
+    method: AuditCheckMethod;
+    notes?: string;
+  }) => {
+    const res = await runMutation({
+      type: 'RECORD_AUDIT_CHECK',
+      sessionId: payload.sessionId,
+      itemId: payload.itemId,
+      actualRoomId: payload.actualRoomId,
+      method: payload.method,
+      checkedByUserId: currentUser?.id,
+      checkedByUserName: currentUser?.fullName || 'Komisijos narys',
+      checkedAt: new Date().toISOString(),
+      ...(payload.notes ? { notes: payload.notes } : {}),
+    });
+    return { ok: res.ok, error: res.error };
+  };
+
+  const handleMarkAuditItemMissing = async (payload: {
+    sessionId: string;
+    itemId: string;
+    notes?: string;
+  }) => {
+    const res = await runMutation({
+      type: 'MARK_AUDIT_ITEM_MISSING',
+      sessionId: payload.sessionId,
+      itemId: payload.itemId,
+      ...(payload.notes ? { notes: payload.notes } : {}),
+    });
+    return { ok: res.ok, error: res.error };
+  };
+
+  const handleCompleteAuditSession = async (payload: {
+    sessionId: string;
+    completedDate: string;
+    notes?: string;
+  }) => {
+    const res = await runMutation({
+      type: 'COMPLETE_AUDIT_SESSION',
+      sessionId: payload.sessionId,
+      completedDate: payload.completedDate,
+      completedByUserId: currentUser?.id,
+      completedByUserName: currentUser?.fullName || 'Komisijos pirmininkas',
+      ...(payload.notes !== undefined ? { notes: payload.notes } : {}),
+    });
+    return { ok: res.ok, error: res.error };
+  };
+
+  // Official Relocate Item during physical audit
+  const handleRelocateItem = async (itemId: string, newRoomId: string, sessionId?: string) => {
+    if (!rooms.some(r => r.id === newRoomId)) {
+      return { ok: false, error: 'Tikslinis kabinetas nerastas.' };
+    }
+    const res = await runMutation({
       type: 'RELOCATE_AUDIT_ITEM',
       itemId,
       newRoomId,
       auditDate: new Date().toISOString().slice(0, 10),
+      ...(sessionId ? { sessionId } : {}),
+      transferredByUserId: currentUser?.id,
+      transferredByUserName: currentUser?.fullName || 'Komisijos narys',
     });
+    return { ok: res.ok, error: res.error };
   };
 
   // Defect / Fault Report Handler from teachers or staff
@@ -827,6 +927,7 @@ export default function App() {
                 rooms={rooms}
                 movements={movements}
                 auditSession={activeAuditSession}
+                users={users}
                 currentUser={currentUser}
                 onNavigate={setCurrentTab}
                 onOpenAddItem={() => {
@@ -917,9 +1018,13 @@ export default function App() {
                 departments={departments}
                 rooms={rooms}
                 users={users}
-                auditSession={activeAuditSession}
+                auditSessions={auditSessions}
                 currentUser={currentUser}
-                onUpdateAuditSession={handleUpdateAuditSession}
+                onCreateAuditSession={handleCreateAuditSession}
+                onUpdateAuditSessionSettings={handleUpdateAuditSessionSettings}
+                onRecordAuditCheck={handleRecordAuditCheck}
+                onMarkAuditItemMissing={handleMarkAuditItemMissing}
+                onCompleteAuditSession={handleCompleteAuditSession}
                 onRelocateItem={handleRelocateItem}
               />
             )}

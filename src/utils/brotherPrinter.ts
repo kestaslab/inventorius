@@ -1,5 +1,6 @@
 import QRCode from 'qrcode';
 import { InventoryItem, Room, Department, formatRoomName } from '../types/inventory';
+import { buildItemQrPayload } from './qrUtils';
 
 export interface BrotherPrintOptions {
   items: InventoryItem[];
@@ -19,11 +20,7 @@ export async function generateQrMapForItems(items: InventoryItem[]): Promise<Rec
   const map: Record<string, string> = {};
   for (const item of items) {
     try {
-      const payload = JSON.stringify({
-        inv: item.inventoryNumber,
-        name: item.name,
-        school: 'Tryškių Lazdynų Pelėdos gimn.'
-      });
+      const payload = buildItemQrPayload(item);
       map[item.id] = await QRCode.toDataURL(payload, {
         margin: 0,
         width: 180,

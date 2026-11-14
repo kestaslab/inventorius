@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { InventoryItem, Department, Room, formatRoomName } from '../types/inventory';
 import { directPrintBrotherLabels } from '../utils/brotherPrinter';
+import { buildItemQrPayload } from '../utils/qrUtils';
 
 interface LabelsQRViewProps {
   items: InventoryItem[];
@@ -149,11 +150,7 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
       for (const item of itemsToGen) {
         if (!qrMap[item.id]) {
           try {
-            const payload = JSON.stringify({
-              inv: item.inventoryNumber,
-              name: item.name,
-              school: 'Tryškių Lazdynų Pelėdos gimn.'
-            });
+            const payload = buildItemQrPayload(item);
             newMap[item.id] = await QRCode.toDataURL(payload, {
               margin: 0,
               width: 180,
@@ -315,7 +312,7 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
       const room = rooms.find(r => r.id === item.roomId);
       const dept = departments.find(d => d.id === item.departmentId);
       const roomStr = formatRoomName(room);
-      const payload = `${item.inventoryNumber} | ${item.name} | Tryškių L. Pelėdos gimn.`;
+      const payload = buildItemQrPayload(item);
       return [
         `"${item.inventoryNumber}"`,
         `"${item.name.replace(/"/g, '""')}"`,

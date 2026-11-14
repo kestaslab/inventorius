@@ -962,11 +962,58 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
       };
     }
     if (s.departmentId !== undefined && s.departmentId !== null && s.departmentId !== '') {
-      if (typeof s.departmentId !== 'string' || !departmentIds.has(s.departmentId)) {
+      if (typeof s.departmentId !== 'string') {
+        return {
+          ok: false,
+          error: `${ctx}: neteisingas „departmentId“ formatas.`,
+        };
+      }
+      // Užbaigtų istorinių sesijų skyrius galėjo būti vėliau perkeltas/ištrintas; vykdomoms sesijoms skyrius privalo egzistuoti
+      if (s.status !== 'completed' && !departmentIds.has(s.departmentId)) {
         return {
           ok: false,
           error: `${ctx}: nurodytas neegzistuojantis skyrius „${String(s.departmentId)}“.`,
         };
+      }
+    }
+
+    if (s.snapshotItems !== undefined) {
+      if (!Array.isArray(s.snapshotItems)) {
+        return { ok: false, error: `${ctx}: „snapshotItems“ turi būti masyvas.` };
+      }
+      for (let j = 0; j < s.snapshotItems.length; j++) {
+        const snap = s.snapshotItems[j];
+        if (
+          !isPlainObject(snap) ||
+          !isNonEmptyString(snap.itemId) ||
+          !isNonEmptyString(snap.inventoryNumber) ||
+          !isNonEmptyString(snap.name)
+        ) {
+          return {
+            ok: false,
+            error: `${ctx} -> snapshotItems[${j}]: trūksta privalomų fiksuoto turto laukų.`,
+          };
+        }
+      }
+    }
+
+    if (s.checkRecords !== undefined) {
+      if (!isPlainObject(s.checkRecords)) {
+        return { ok: false, error: `${ctx}: „checkRecords“ turi būti objektas.` };
+      }
+      for (const [key, rec] of Object.entries(s.checkRecords)) {
+        if (
+          !isPlainObject(rec) ||
+          !isNonEmptyString(rec.itemId) ||
+          (rec.outcome !== 'found' && rec.outcome !== 'found_elsewhere') ||
+          !isNonEmptyString(rec.checkedAt) ||
+          !isNonEmptyString(rec.actualRoomId)
+        ) {
+          return {
+            ok: false,
+            error: `${ctx} -> checkRecords[${key}]: neteisinga patikrinimo įrašo struktūra.`,
+          };
+        }
       }
     }
 

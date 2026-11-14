@@ -22,13 +22,15 @@ import {
   User 
 } from '../types/inventory';
 import { NavigationTab } from './Sidebar';
+import { computeAuditStats, getEffectiveSessionRows } from '../utils/auditUtils';
 
 interface DashboardViewProps {
   items: InventoryItem[];
   departments: Department[];
   rooms: Room[];
   movements: MovementRecord[];
-  auditSession: AuditSession;
+  auditSession?: AuditSession;
+  users?: User[];
   currentUser: User;
   onNavigate: (tab: NavigationTab) => void;
   onOpenAddItem: () => void;
@@ -41,6 +43,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   rooms,
   movements,
   auditSession,
+  users = [],
   currentUser,
   onNavigate,
   onOpenAddItem,
@@ -55,8 +58,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const totalPurchaseValue = items.reduce((acc, i) => acc + (i.purchasePrice || 0), 0);
   const totalResidualValue = items.reduce((acc, i) => acc + (i.residualValue || 0), 0);
 
-  const scannedCount = auditSession.scannedItemIds.length;
-  const auditProgressPct = totalItems > 0 ? Math.round((scannedCount / totalItems) * 100) : 0;
+  const auditRows = auditSession
+    ? getEffectiveSessionRows(auditSession, items, departments, rooms, users, 'all')
+    : [];
+  const auditStats = computeAuditStats(auditRows);
+  const scannedCount = auditStats.checkedCount;
+  const auditExpectedTotal = auditStats.total;
+  const auditProgressPct = auditStats.progressPercent;
 
   // Accounting classifications (VSAKIS 750 EUR threshold)
   const longTermItems = items.filter(i => i.assetClass === 'long_term' || (i.purchasePrice >= 750 && i.assetClass !== 'short_term'));
@@ -172,7 +180,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         {/* Audit Progress */}
         <div className="bg-white border border-slate-300 rounded-xl p-4 shadow-xs">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-slate-600 font-bold uppercase tracking-wider">2026 m. inventorizacija</span>
+            <span className="text-xs text-slate-600 font-bold uppercase tracking-wider">
+              {auditSession ? `${auditSession.year} m. inventorizacija` : 'Inventorizacija'}
+            </span>
             <CheckCircle2 className="w-4 h-4 text-emerald-600" />
           </div>
           <div className="mt-2 flex items-baseline gap-2">
@@ -180,7 +190,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               {auditProgressPct}%
             </span>
             <span className="text-xs font-semibold text-slate-600">
-              ({scannedCount} iš {totalItems})
+              {auditSession ? `(${scannedCount} iš ${auditExpectedTotal})` : '(sesija nepradėta)'}
             </span>
           </div>
           <div className="mt-2 w-full bg-slate-200 rounded-full h-2 overflow-hidden border border-slate-300/40">
