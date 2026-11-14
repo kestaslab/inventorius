@@ -18,28 +18,47 @@ import {
   AlertTriangle,
   Info,
   Calendar,
-  CheckCircle2
+  CheckCircle2,
+  Eye,
+  Loader2,
 } from 'lucide-react';
-import { StorageService } from '../utils/storage';
-import { User } from '../types/inventory';
+import { StorageService, SyncState } from '../utils/storage';
+import { User, InventoryItem, Room, MovementRecord, WriteOffAct } from '../types/inventory';
 
 interface SelfHostViewProps {
   currentUser: User;
   onRefreshData: () => void;
+  items?: InventoryItem[];
+  rooms?: Room[];
+  movements?: MovementRecord[];
+  writeOffActs?: WriteOffAct[];
+  syncState?: SyncState;
 }
 
-export const SelfHostView: React.FC<SelfHostViewProps> = ({ currentUser, onRefreshData }) => {
+export const SelfHostView: React.FC<SelfHostViewProps> = ({
+  currentUser,
+  onRefreshData,
+  items,
+  rooms,
+  movements,
+  writeOffActs,
+  syncState,
+}) => {
   const [copiedSection, setCopiedSection] = useState<string | null>(null);
   const [restoreMessage, setRestoreMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [showResetConfirmModal, setShowResetConfirmModal] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const [isResettingServer, setIsResettingServer] = useState(false);
 
   const isAdmin = currentUser.role === 'admin';
+  const isLocalPreview = Boolean(syncState?.localPreviewMode);
 
   // Current database statistics
-  const currentItems = StorageService.getItems();
-  const currentRooms = StorageService.getRooms();
-  const currentMovements = StorageService.getMovements();
-  const currentWriteOffs = StorageService.getWriteOffActs();
+  const currentItems = items ?? StorageService.getItems();
+  const currentRooms = rooms ?? StorageService.getRooms();
+  const currentMovements = movements ?? StorageService.getMovements();
+  const currentWriteOffs = writeOffActs ?? StorageService.getWriteOffActs();
 
   const copyToClipboard = (text: string, id: string) => {
     navigator.clipboard.writeText(text);
@@ -47,15 +66,20 @@ export const SelfHostView: React.FC<SelfHostViewProps> = ({ currentUser, onRefre
     setTimeout(() => setCopiedSection(null), 2000);
   };
 
-  const handleDownloadBackup = () => {
-    const json = StorageService.exportFullBackup();
-    const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `tryskiu-mokykla-inventorius-backup-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+  const handleDownloadBackup = async () => {
+    try {
+      setIsExporting(true);
+      const json = await StorageService.exportFullBackupAsync();
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `tryskiu-mokykla-inventorius-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   const handleFileRestore = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -63,25 +87,72 @@ export const SelfHostView: React.FC<SelfHostViewProps> = ({ currentUser, onRefre
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       const content = event.target?.result as string;
-      const success = StorageService.importFullBackup(content);
-      if (success) {
-        setRestoreMessage({ type: 'success', text: 'Duomenų bazė sėkmingai atstatyta iš atsarginės kopijos!' });
-        onRefreshData();
-      } else {
-        setRestoreMessage({ type: 'error', text: 'Klaida: netinkamas failo formatas arba sugadinti duomenys.' });
+      setIsImporting(true);
+      setRestoreMessage(null);
+      try {
+        const result = await StorageService.importFullBackup(content);
+        if (result.ok) {
+          const extra = result.migrated ? ' Duomenų struktūra sėkmingai migruota į 1.1.0 versiją.' : '';
+          const bkp = result.backupFile ? ` Ankstesnės serverio bazės kopija išsaugota: ${result.backupFile}.` : '';
+          setRestoreMessage({
+            type: 'success',
+            text: `Duomenų bazė sėkmingai atstatyta iš atsarginės kopijos!${extra}${bkp}`,
+          });
+          onRefreshData();
+        } else {
+          setRestoreMessage({
+            type: 'error',
+            text: result.error || 'Klaida: netinkamas failo formatas arba sugadinti duomenys.',
+          });
+        }
+      } finally {
+        setIsImporting(false);
       }
     };
     reader.readAsText(file);
     e.target.value = '';
   };
 
-  const executeResetData = () => {
-    StorageService.resetToDefaults();
+  const handleActivateLocalPreview = () => {
+    StorageService.activateLocalDemoPreview();
     onRefreshData();
     setShowResetConfirmModal(false);
-    setRestoreMessage({ type: 'success', text: 'Grąžinti pradiniai demonstraciniai duomenys.' });
+    setRestoreMessage({
+      type: 'success',
+      text: 'Įjungta vietinė demonstracinė peržiūra šiame naršyklės lange. Centrinė serverio duomenų bazė nepakeista.',
+    });
+  };
+
+  const handleExitLocalPreview = async () => {
+    await StorageService.exitLocalDemoPreview();
+    onRefreshData();
+    setRestoreMessage({
+      type: 'success',
+      text: 'Grįžta prie pagrindinių centrinio serverio duomenų.',
+    });
+  };
+
+  const executeResetCentralServer = async () => {
+    setIsResettingServer(true);
+    try {
+      const res = await StorageService.resetCentralServerToDemo();
+      if (res.ok) {
+        onRefreshData();
+        setShowResetConfirmModal(false);
+        const bkp = res.backupFile ? ` Ankstesnės bazės kopija išsaugota: ${res.backupFile}.` : '';
+        setRestoreMessage({
+          type: 'success',
+          text: `Centrinė serverio bazė pakeista pradiniais duomenimis.${bkp}`,
+        });
+      } else {
+        setShowResetConfirmModal(false);
+        setRestoreMessage({ type: 'error', text: res.error });
+      }
+    } finally {
+      setIsResettingServer(false);
+    }
   };
 
   const dockerComposeCode = `version: '3.8'
@@ -251,28 +322,41 @@ chmod +x /opt/inventorius/update.sh
           <div className="space-y-3 pt-1">
             <button
               onClick={handleDownloadBackup}
-              className="w-full flex items-center justify-center gap-2 py-2.5 px-3 text-xs font-bold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg transition-colors cursor-pointer"
+              disabled={isExporting}
+              className="w-full flex items-center justify-center gap-2 py-2.5 px-3 text-xs font-bold text-slate-800 bg-slate-100 hover:bg-slate-200 disabled:opacity-60 border border-slate-300 rounded-lg transition-colors cursor-pointer"
             >
-              <Download className="w-4 h-4 text-blue-600" />
-              <span>Atsisiųsti pilną JSON atsarginę kopiją</span>
+              {isExporting ? <Loader2 className="w-4 h-4 animate-spin text-blue-600" /> : <Download className="w-4 h-4 text-blue-600" />}
+              <span>{isExporting ? 'Ruošiama atsarginė kopija su nuotraukomis...' : 'Atsisiųsti pilną JSON atsarginę kopiją'}</span>
             </button>
 
             <div className="relative">
               <input
                 type="file"
                 accept=".json"
+                disabled={isImporting}
                 onChange={handleFileRestore}
                 id="file-restore"
                 className="hidden"
               />
               <label
                 htmlFor="file-restore"
-                className="w-full flex items-center justify-center gap-2 py-2.5 px-3 text-xs font-bold text-slate-800 bg-white hover:bg-slate-50 border border-slate-300 rounded-lg transition-colors cursor-pointer"
+                className={`w-full flex items-center justify-center gap-2 py-2.5 px-3 text-xs font-bold text-slate-800 bg-white hover:bg-slate-50 border border-slate-300 rounded-lg transition-colors ${isImporting ? 'opacity-60 pointer-events-none' : 'cursor-pointer'}`}
               >
-                <Upload className="w-4 h-4 text-emerald-600" />
-                <span>Atstatyti duomenų bazę iš failo (.JSON)</span>
+                {isImporting ? <Loader2 className="w-4 h-4 animate-spin text-emerald-600" /> : <Upload className="w-4 h-4 text-emerald-600" />}
+                <span>{isImporting ? 'Tikrinama ir atkuriama į serverį...' : 'Atstatyti duomenų bazę iš failo (.JSON)'}</span>
               </label>
             </div>
+
+            {isLocalPreview && (
+              <button
+                type="button"
+                onClick={handleExitLocalPreview}
+                className="w-full flex items-center justify-center gap-1.5 py-2 px-3 text-xs font-bold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg transition-colors cursor-pointer"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                <span>Išjungti vietinę peržiūrą ir grįžti prie serverio duomenų</span>
+              </button>
+            )}
 
             {isAdmin && (
               <button
@@ -281,7 +365,7 @@ chmod +x /opt/inventorius/update.sh
                 className="w-full flex items-center justify-center gap-1.5 py-1.5 px-3 text-[11px] font-medium text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
-                <span>Atkurti pradinius demonstracinius duomenis (tik Admin)</span>
+                <span>Demonstraciniai duomenys (peržiūra arba centrinės DB atkūrimas)</span>
               </button>
             )}
 
@@ -469,27 +553,60 @@ chmod +x /opt/inventorius/update.sh
         </>
       )}
 
-      {/* In-app Reset Confirmation Modal (No browser confirm alert) */}
+      {/* In-app Reset Confirmation Modal (Explicitly separates local preview vs central server reset) */}
       {showResetConfirmModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-          <div className="bg-white border border-slate-200 rounded-xl max-w-md w-full p-5 shadow-2xl space-y-4 animate-scale-in">
+          <div className="bg-white border border-slate-200 rounded-xl max-w-lg w-full p-5 shadow-2xl space-y-4 animate-scale-in">
             <div className="flex items-center gap-3 text-rose-600">
               <div className="w-10 h-10 rounded-full bg-rose-50 flex items-center justify-center shrink-0">
                 <AlertTriangle className="w-5 h-5" />
               </div>
               <div>
                 <h4 className="font-bold text-slate-900 text-sm">
-                  Atkurti demonstracinius duomenis?
+                  Demonstraciniai duomenys: pasirinkite veiksmą
                 </h4>
                 <p className="text-xs text-slate-500">
-                  Šis veiksmas ištrins visus naujai sukurtus įrašus
+                  Atskirkite saugią vietinę peržiūrą nuo centrinės serverio bazės keitimo
                 </p>
               </div>
             </div>
 
-            <p className="text-xs text-slate-600 leading-relaxed">
-              Ar tikrai norite atkurti pradines demonstracines mokyklos reikšmes? Visi Jūsų sukurti kabinetai, registruotas turtas ir pakeitimai bus pakeisti pradiniais demonstraciniais duomenimis.
-            </p>
+            <div className="space-y-3 text-xs">
+              <div className="p-3.5 rounded-lg border border-blue-200 bg-blue-50/60 space-y-2">
+                <div className="font-bold text-blue-950 flex items-center gap-1.5">
+                  <Eye className="w-4 h-4 text-blue-600" />
+                  <span>1. Tik vietinė peržiūra (rekomenduojama bandymams)</span>
+                </div>
+                <p className="text-slate-600 leading-relaxed">
+                  Demonstraciniai duomenys bus rodomi <strong>tik šiame naršyklės lange</strong>. Centrinė gimnazijos duomenų bazė serveryje liks 100 % nepakeista.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleActivateLocalPreview}
+                  className="px-3 py-1.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors cursor-pointer"
+                >
+                  Įjungti vietinę peržiūrą
+                </button>
+              </div>
+
+              <div className="p-3.5 rounded-lg border border-rose-200 bg-rose-50/50 space-y-2">
+                <div className="font-bold text-rose-950 flex items-center gap-1.5">
+                  <RotateCcw className="w-4 h-4 text-rose-600" />
+                  <span>2. Perrašyti centrinę serverio bazę</span>
+                </div>
+                <p className="text-slate-600 leading-relaxed">
+                  Visi centrinėje serverio duomenų bazėje esantys įrašai bus pakeisti pradiniais demonstraciniais duomenimis visiems naudotojams. Prieš perrašant serveris automatiškai išsaugos esamos bazės kopiją <code>data/backups/</code> kataloge.
+                </p>
+                <button
+                  type="button"
+                  disabled={isResettingServer}
+                  onClick={executeResetCentralServer}
+                  className="px-3 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-60 rounded-lg transition-colors cursor-pointer"
+                >
+                  {isResettingServer ? 'Perrašoma serverio bazė...' : 'Perrašyti centrinę serverio bazę'}
+                </button>
+              </div>
+            </div>
 
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
               <button
@@ -498,13 +615,6 @@ chmod +x /opt/inventorius/update.sh
                 className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
               >
                 Atšaukti
-              </button>
-              <button
-                type="button"
-                onClick={executeResetData}
-                className="px-3 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-lg transition-colors cursor-pointer"
-              >
-                Taip, atkurti demonstracinius
               </button>
             </div>
           </div>

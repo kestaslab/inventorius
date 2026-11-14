@@ -1,18 +1,23 @@
 import React, { useState } from 'react';
-import { 
-  Building2, 
-  DoorClosed, 
-  Plus, 
-  User as UserIcon, 
-  Boxes, 
-  ChevronRight,
-  FolderTree,
-  MapPin,
+import {
+  Building2,
+  DoorClosed,
+  Plus,
+  Boxes,
   Edit3,
   Trash2,
-  AlertTriangle
+  Archive,
+  RotateCcw,
+  ArrowRightLeft,
 } from 'lucide-react';
-import { Department, Room, InventoryItem, User, formatRoomName } from '../types/inventory';
+import {
+  Department,
+  Room,
+  InventoryItem,
+  User,
+  formatRoomName,
+  getUserAssignedRoomIds,
+} from '../types/inventory';
 
 interface DepartmentsRoomsViewProps {
   departments: Department[];
@@ -22,8 +27,12 @@ interface DepartmentsRoomsViewProps {
   currentUser: User;
   onSaveDepartment: (dept: Department) => void;
   onDeleteDepartment: (deptId: string) => void;
+  onTransferAndDeleteDepartment: (deptId: string, targetDeptId: string) => void;
+  onArchiveDepartment: (deptId: string, isArchived: boolean) => void;
   onSaveRoom: (room: Room) => void;
   onDeleteRoom: (roomId: string) => void;
+  onTransferAndDeleteRoom: (roomId: string, targetRoomId: string) => void;
+  onArchiveRoom: (roomId: string, isArchived: boolean) => void;
   onViewItemDetail: (item: InventoryItem) => void;
 }
 
@@ -35,42 +44,62 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
   currentUser,
   onSaveDepartment,
   onDeleteDepartment,
+  onTransferAndDeleteDepartment,
+  onArchiveDepartment,
   onSaveRoom,
   onDeleteRoom,
+  onTransferAndDeleteRoom,
+  onArchiveRoom,
   onViewItemDetail,
 }) => {
-  const [selectedDeptId, setSelectedDeptId] = useState<string>(departments[0]?.id || '');
+  const [showArchived, setShowArchived] = useState(false);
+  const visibleDepartments = showArchived
+    ? departments
+    : departments.filter((d) => !d.isArchived);
+  const archivedCount =
+    departments.filter((d) => d.isArchived).length + rooms.filter((r) => r.isArchived).length;
+
+  const [selectedDeptId, setSelectedDeptId] = useState<string>(
+    departments.find((d) => !d.isArchived)?.id || departments[0]?.id || ''
+  );
   const [selectedRoomId, setSelectedRoomId] = useState<string>('');
 
   // Modals state
   const [isDeptModalOpen, setIsDeptModalOpen] = useState(false);
   const [editingDept, setEditingDept] = useState<Department | null>(null);
-  const [deptForm, setDeptForm] = useState({ 
-    name: '', 
-    code: '', 
-    building: '', 
+  const [deptForm, setDeptForm] = useState({
+    name: '',
+    code: '',
+    building: '',
     description: '',
-    managerId: '' 
+    managerId: '',
   });
 
   const [isRoomModalOpen, setIsRoomModalOpen] = useState(false);
   const [editingRoom, setEditingRoom] = useState<Room | null>(null);
-  const [roomForm, setRoomForm] = useState({ 
+  const [roomForm, setRoomForm] = useState({
     departmentId: '',
-    number: '', 
-    name: '', 
-    floor: 1, 
-    defaultResponsiblePersonId: '' 
+    number: '',
+    name: '',
+    floor: 1,
+    defaultResponsiblePersonId: '',
   });
 
-  const activeDept = departments.find(d => d.id === selectedDeptId);
-  const deptRooms = rooms.filter(r => r.departmentId === selectedDeptId);
+  const [targetTransferDeptId, setTargetTransferDeptId] = useState<string>('');
+  const [targetTransferRoomId, setTargetTransferRoomId] = useState<string>('');
+
+  const activeDept = departments.find((d) => d.id === selectedDeptId);
+  const deptRooms = rooms.filter(
+    (r) => r.departmentId === selectedDeptId && (showArchived || !r.isArchived)
+  );
 
   // Active room items
-  const activeRoom = rooms.find(r => r.id === selectedRoomId);
-  const roomItems = selectedRoomId ? items.filter(i => i.roomId === selectedRoomId) : [];
+  const activeRoom = rooms.find((r) => r.id === selectedRoomId);
+  const roomItems = selectedRoomId ? items.filter((i) => i.roomId === selectedRoomId) : [];
 
   const canManage = currentUser.role === 'admin' || currentUser.role === 'manager';
+
+  const activeUsers = users.filter((u) => !u.isArchived && u.isActive !== false);
 
   // --- Department Handlers ---
   const handleOpenCreateDept = () => {
@@ -80,7 +109,7 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
       code: '',
       building: '',
       description: '',
-      managerId: users[0]?.id || '',
+      managerId: activeUsers[0]?.id || '',
     });
     setIsDeptModalOpen(true);
   };
@@ -103,6 +132,8 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
 
   const handleDeleteDeptConfirm = (dept: Department, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
+    const altDept = departments.find((d) => d.id !== dept.id && !d.isArchived);
+    setTargetTransferDeptId(altDept?.id || '');
     setDeptToDelete(dept);
   };
 
@@ -110,7 +141,27 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
     if (!deptToDelete) return;
     onDeleteDepartment(deptToDelete.id);
     if (selectedDeptId === deptToDelete.id) {
-      const remaining = departments.filter(d => d.id !== deptToDelete.id);
+      const remaining = departments.filter((d) => d.id !== deptToDelete.id && !d.isArchived);
+      setSelectedDeptId(remaining[0]?.id || '');
+      setSelectedRoomId('');
+    }
+    setDeptToDelete(null);
+  };
+
+  const executeTransferAndDeleteDept = () => {
+    if (!deptToDelete || !targetTransferDeptId) return;
+    onTransferAndDeleteDepartment(deptToDelete.id, targetTransferDeptId);
+    if (selectedDeptId === deptToDelete.id) {
+      setSelectedDeptId(targetTransferDeptId);
+      setSelectedRoomId('');
+    }
+    setDeptToDelete(null);
+  };
+
+  const executeArchiveDept = (dept: Department, archive: boolean) => {
+    onArchiveDepartment(dept.id, archive);
+    if (archive && !showArchived && selectedDeptId === dept.id) {
+      const remaining = departments.filter((d) => d.id !== dept.id && !d.isArchived);
       setSelectedDeptId(remaining[0]?.id || '');
       setSelectedRoomId('');
     }
@@ -151,11 +202,11 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
   const handleOpenCreateRoom = () => {
     setEditingRoom(null);
     setRoomForm({
-      departmentId: selectedDeptId || departments[0]?.id || '',
+      departmentId: selectedDeptId || departments.find((d) => !d.isArchived)?.id || '',
       number: '',
       name: '',
       floor: 1,
-      defaultResponsiblePersonId: users[0]?.id || '',
+      defaultResponsiblePersonId: activeUsers[0]?.id || '',
     });
     setIsRoomModalOpen(true);
   };
@@ -175,6 +226,8 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
 
   const handleDeleteRoomConfirm = (room: Room, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
+    const altRoom = rooms.find((r) => r.id !== room.id && !r.isArchived);
+    setTargetTransferRoomId(altRoom?.id || '');
     setRoomToDelete(room);
   };
 
@@ -182,6 +235,23 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
     if (!roomToDelete) return;
     onDeleteRoom(roomToDelete.id);
     if (selectedRoomId === roomToDelete.id) {
+      setSelectedRoomId('');
+    }
+    setRoomToDelete(null);
+  };
+
+  const executeTransferAndDeleteRoom = () => {
+    if (!roomToDelete || !targetTransferRoomId) return;
+    onTransferAndDeleteRoom(roomToDelete.id, targetTransferRoomId);
+    if (selectedRoomId === roomToDelete.id) {
+      setSelectedRoomId(targetTransferRoomId);
+    }
+    setRoomToDelete(null);
+  };
+
+  const executeArchiveRoom = (room: Room, archive: boolean) => {
+    onArchiveRoom(room.id, archive);
+    if (archive && !showArchived && selectedRoomId === room.id) {
       setSelectedRoomId('');
     }
     setRoomToDelete(null);
@@ -231,24 +301,40 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
             Mokyklos skyriai, korpusai, kabinetai ir materialiojo turto paskirstymas patalpose
           </p>
         </div>
-        {canManage && (
-          <div className="flex items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2.5">
+          {archivedCount > 0 && (
             <button
-              onClick={handleOpenCreateDept}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 hover:border-slate-400 transition-all shadow-xs cursor-pointer"
+              type="button"
+              onClick={() => setShowArchived((prev) => !prev)}
+              className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
+                showArchived
+                  ? 'bg-amber-50 text-amber-900 border-amber-300'
+                  : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'
+              }`}
             >
-              <Plus className="w-4 h-4 text-blue-600" />
-              <span>+ Naujas skyrius</span>
+              <Archive className="w-3.5 h-3.5" />
+              <span>{showArchived ? 'Slėpti archyvuotus' : `Rodyti archyvuotus (${archivedCount})`}</span>
             </button>
-            <button
-              onClick={handleOpenCreateRoom}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-all shadow-sm cursor-pointer"
-            >
-              <Plus className="w-4 h-4 text-white" />
-              <span>+ Naujas kabinetas</span>
-            </button>
-          </div>
-        )}
+          )}
+          {canManage && (
+            <>
+              <button
+                onClick={handleOpenCreateDept}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 hover:border-slate-400 transition-all shadow-xs cursor-pointer"
+              >
+                <Plus className="w-4 h-4 text-blue-600" />
+                <span>+ Naujas skyrius</span>
+              </button>
+              <button
+                onClick={handleOpenCreateRoom}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-all shadow-sm cursor-pointer"
+              >
+                <Plus className="w-4 h-4 text-white" />
+                <span>+ Naujas kabinetas</span>
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* 3-Column Explorer Layout */}
@@ -257,19 +343,19 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
         <div className="md:col-span-4 space-y-3">
           <div className="flex items-center justify-between px-1">
             <span className="text-xs font-semibold uppercase text-slate-500 tracking-wider">
-              Skyriai ({departments.length})
+              Skyriai ({visibleDepartments.length})
             </span>
           </div>
 
           <div className="space-y-2">
-            {departments.length === 0 ? (
+            {visibleDepartments.length === 0 ? (
               <div className="bg-white border border-slate-200 rounded-lg p-6 text-center text-xs text-slate-400">
-                Nėra sukurtų skyrių
+                Nėra aktyvių skyrių
               </div>
             ) : (
-              departments.map((dept) => {
-                const countRooms = rooms.filter(r => r.departmentId === dept.id).length;
-                const countItems = items.filter(i => i.departmentId === dept.id).length;
+              visibleDepartments.map((dept) => {
+                const countRooms = rooms.filter((r) => r.departmentId === dept.id && !r.isArchived).length;
+                const countItems = items.filter((i) => i.departmentId === dept.id).length;
                 const isSelected = selectedDeptId === dept.id;
 
                 return (
@@ -280,6 +366,8 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
                       setSelectedRoomId(''); // reset room
                     }}
                     className={`group relative p-3.5 rounded-xl border transition-all cursor-pointer text-left ${
+                      dept.isArchived ? 'opacity-75 bg-slate-50/90 ' : ''
+                    }${
                       isSelected
                         ? 'bg-blue-50/90 border-2 border-blue-600 shadow-sm ring-2 ring-blue-500/20'
                         : 'bg-white border border-slate-300 hover:border-slate-400 hover:shadow-sm shadow-xs'
@@ -289,6 +377,11 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
                       <div className="flex items-center gap-2 min-w-0">
                         <Building2 className={`w-4 h-4 shrink-0 ${isSelected ? 'text-blue-600' : 'text-slate-600'}`} />
                         <span className="text-xs font-bold text-slate-900 truncate">{dept.name}</span>
+                        {dept.isArchived && (
+                          <span className="text-[10px] font-semibold bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded shrink-0">
+                            Archyvuotas
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-1.5 shrink-0">
                         <span className="text-[11px] font-mono font-bold text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
@@ -296,20 +389,35 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
                         </span>
                         {canManage && (
                           <div className="flex items-center gap-1 ml-1">
-                            <button
-                              onClick={(e) => handleOpenEditDept(dept, e)}
-                              title="Redaguoti skyrių"
-                              className="p-1.5 text-slate-700 hover:text-blue-700 bg-slate-100 hover:bg-blue-50 border border-slate-200 rounded-md transition-colors cursor-pointer shadow-2xs"
-                            >
-                              <Edit3 className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              onClick={(e) => handleDeleteDeptConfirm(dept, e)}
-                              title="Ištrinti skyrių"
-                              className="p-1.5 text-slate-700 hover:text-rose-700 bg-slate-100 hover:bg-rose-50 border border-slate-200 rounded-md transition-colors cursor-pointer shadow-2xs"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                            {dept.isArchived ? (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onArchiveDepartment(dept.id, false);
+                                }}
+                                title="Atkurti skyrių iš archyvo"
+                                className="p-1.5 text-emerald-700 hover:bg-emerald-50 bg-white border border-emerald-200 rounded-md transition-colors cursor-pointer shadow-2xs"
+                              >
+                                <RotateCcw className="w-3.5 h-3.5" />
+                              </button>
+                            ) : (
+                              <>
+                                <button
+                                  onClick={(e) => handleOpenEditDept(dept, e)}
+                                  title="Redaguoti skyrių"
+                                  className="p-1.5 text-slate-700 hover:text-blue-700 bg-slate-100 hover:bg-blue-50 border border-slate-200 rounded-md transition-colors cursor-pointer shadow-2xs"
+                                >
+                                  <Edit3 className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={(e) => handleDeleteDeptConfirm(dept, e)}
+                                  title="Ištrinti arba archyvuoti skyrių"
+                                  className="p-1.5 text-slate-700 hover:text-rose-700 bg-slate-100 hover:bg-rose-50 border border-slate-200 rounded-md transition-colors cursor-pointer shadow-2xs"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </>
+                            )}
                           </div>
                         )}
                       </div>
@@ -372,6 +480,11 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
                         <span className={`text-xs font-bold truncate ${isSelected ? 'text-white' : 'text-slate-900'}`}>
                           {room.number?.trim() ? `${room.number} kab.` : room.name}
                         </span>
+                        {room.isArchived && (
+                          <span className="text-[10px] font-semibold bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded shrink-0">
+                            Archyvuotas
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-1.5 shrink-0">
                         <span className={`text-[11px] font-mono tabular-nums font-semibold ${isSelected ? 'text-blue-100' : 'text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200'}`}>
@@ -379,28 +492,43 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
                         </span>
                         {canManage && (
                           <div className="flex items-center gap-1 ml-1">
-                            <button
-                              onClick={(e) => handleOpenEditRoom(room, e)}
-                              title="Redaguoti kabinetą"
-                              className={`p-1.5 rounded-md transition-colors cursor-pointer shadow-2xs ${
-                                isSelected 
-                                  ? 'text-white bg-blue-700 hover:bg-blue-800 border border-blue-500' 
-                                  : 'text-slate-700 hover:text-blue-700 bg-slate-100 hover:bg-blue-50 border border-slate-200'
-                              }`}
-                            >
-                              <Edit3 className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              onClick={(e) => handleDeleteRoomConfirm(room, e)}
-                              title="Ištrinti kabinetą"
-                              className={`p-1.5 rounded-md transition-colors cursor-pointer shadow-2xs ${
-                                isSelected 
-                                  ? 'text-white bg-blue-700 hover:bg-rose-600 border border-blue-500' 
-                                  : 'text-slate-700 hover:text-rose-700 bg-slate-100 hover:bg-rose-50 border border-slate-200'
-                              }`}
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                            {room.isArchived ? (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onArchiveRoom(room.id, false);
+                                }}
+                                title="Atkurti kabinetą iš archyvo"
+                                className="p-1.5 text-emerald-700 bg-white hover:bg-emerald-50 border border-emerald-200 rounded-md transition-colors cursor-pointer shadow-2xs"
+                              >
+                                <RotateCcw className="w-3.5 h-3.5" />
+                              </button>
+                            ) : (
+                              <>
+                                <button
+                                  onClick={(e) => handleOpenEditRoom(room, e)}
+                                  title="Redaguoti kabinetą"
+                                  className={`p-1.5 rounded-md transition-colors cursor-pointer shadow-2xs ${
+                                    isSelected
+                                      ? 'text-white bg-blue-700 hover:bg-blue-800 border border-blue-500'
+                                      : 'text-slate-700 hover:text-blue-700 bg-slate-100 hover:bg-blue-50 border border-slate-200'
+                                  }`}
+                                >
+                                  <Edit3 className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={(e) => handleDeleteRoomConfirm(room, e)}
+                                  title="Ištrinti arba archyvuoti kabinetą"
+                                  className={`p-1.5 rounded-md transition-colors cursor-pointer shadow-2xs ${
+                                    isSelected
+                                      ? 'text-white bg-blue-700 hover:bg-rose-600 border border-blue-500'
+                                      : 'text-slate-700 hover:text-rose-700 bg-slate-100 hover:bg-rose-50 border border-slate-200'
+                                  }`}
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </>
+                            )}
                           </div>
                         )}
                       </div>
@@ -536,48 +664,52 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
 
               <div>
                 <label className="block text-slate-700 font-medium mb-1">Skyriaus vedėjas / Vadovas</label>
-                <select
-                  value={deptForm.managerId}
-                  onChange={(e) => setDeptForm({ ...deptForm, managerId: e.target.value })}
-                  className="w-full border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500"
-                >
-                  <option value="">Pasirinkti vadovą</option>
-                  {users.map(u => (
-                    <option key={u.id} value={u.id}>{u.fullName} ({u.roleTitle})</option>
-                  ))}
-                </select>
-              </div>
+                  <select
+                    value={deptForm.managerId}
+                    onChange={(e) => setDeptForm({ ...deptForm, managerId: e.target.value })}
+                    className="w-full border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500"
+                  >
+                    <option value="">Pasirinkti vadovą</option>
+                    {users
+                      .filter((u) => (!u.isArchived && u.isActive !== false) || u.id === deptForm.managerId)
+                      .map((u) => (
+                        <option key={u.id} value={u.id}>
+                          {u.fullName} ({u.roleTitle}){u.isArchived ? ' [Archyvuotas]' : ''}
+                        </option>
+                      ))}
+                  </select>
+                </div>
 
-              <div>
-                <label className="block text-slate-700 font-medium mb-1">Aprašymas</label>
-                <textarea
-                  rows={2}
-                  placeholder="Skyriaus paskirtis, veiklos sritis..."
-                  value={deptForm.description}
-                  onChange={(e) => setDeptForm({ ...deptForm, description: e.target.value })}
-                  className="w-full border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500"
-                />
-              </div>
+                <div>
+                  <label className="block text-slate-700 font-medium mb-1">Aprašymas</label>
+                  <textarea
+                    rows={2}
+                    placeholder="Skyriaus paskirtis, veiklos sritis..."
+                    value={deptForm.description}
+                    onChange={(e) => setDeptForm({ ...deptForm, description: e.target.value })}
+                    className="w-full border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
 
-              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setIsDeptModalOpen(false)}
-                  className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded cursor-pointer"
-                >
-                  Atšaukti
-                </button>
-                <button
-                  type="submit"
-                  className="px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded shadow-xs cursor-pointer"
-                >
-                  {editingDept ? 'Išsaugoti pakeitimus' : 'Sukurti skyrių'}
-                </button>
-              </div>
-            </form>
+                <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => setIsDeptModalOpen(false)}
+                    className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded cursor-pointer"
+                  >
+                    Atšaukti
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded shadow-xs cursor-pointer"
+                  >
+                    {editingDept ? 'Išsaugoti pakeitimus' : 'Sukurti skyrių'}
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
       {/* Modal: New / Edit Room */}
       {isRoomModalOpen && (
@@ -587,8 +719,8 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
               <h3 className="text-sm font-semibold text-slate-900">
                 {editingRoom ? 'Redaguoti kabinetą / patalpą' : 'Pridėti naują kabinetą / patalpą'}
               </h3>
-              <button 
-                type="button" 
+              <button
+                type="button"
                 onClick={() => setIsRoomModalOpen(false)}
                 className="text-slate-400 hover:text-slate-600 text-sm font-semibold"
               >
@@ -605,10 +737,23 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
                   onChange={(e) => setRoomForm({ ...roomForm, departmentId: e.target.value })}
                   className="w-full border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500"
                 >
-                  {departments.map(d => (
-                    <option key={d.id} value={d.id}>{d.name} [{d.code}]</option>
-                  ))}
+                  {departments
+                    .filter((d) => !d.isArchived || d.id === roomForm.departmentId)
+                    .map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name} [{d.code}]{d.isArchived ? ' (Archyvuotas)' : ''}
+                      </option>
+                    ))}
                 </select>
+                {editingRoom &&
+                  editingRoom.departmentId !== roomForm.departmentId &&
+                  items.some((i) => i.roomId === editingRoom.id) && (
+                    <p className="mt-1.5 p-2 bg-blue-50 border border-blue-200 rounded text-[11px] text-blue-900">
+                      Šiame kabinete yra{' '}
+                      <strong>{items.filter((i) => i.roomId === editingRoom.id).length}</strong>{' '}
+                      turto vnt. Pakeitus skyrių, viso jame esančio turto skyrius bus automatiškai atnaujintas ir užfiksuotas judėjimo žurnale.
+                    </p>
+                  )}
               </div>
 
               <div className="grid grid-cols-2 gap-2">
@@ -657,9 +802,17 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
                   className="w-full border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500"
                 >
                   <option value="">Pasirinkti mokytoją / darbuotoją</option>
-                  {users.map(u => (
-                    <option key={u.id} value={u.id}>{u.fullName} ({u.roleTitle})</option>
-                  ))}
+                  {users
+                    .filter(
+                      (u) =>
+                        (!u.isArchived && u.isActive !== false) ||
+                        u.id === roomForm.defaultResponsiblePersonId
+                    )
+                    .map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.fullName} ({u.roleTitle}){u.isArchived ? ' [Archyvuotas]' : ''}
+                      </option>
+                    ))}
                 </select>
               </div>
 
@@ -683,120 +836,224 @@ export const DepartmentsRoomsView: React.FC<DepartmentsRoomsViewProps> = ({
         </div>
       )}
 
-      {/* Department Delete Confirmation Modal */}
-      {deptToDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-2xs animate-fade-in">
-          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full border border-slate-300 overflow-hidden flex flex-col">
-            <div className="p-6 space-y-4">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
-                  <Trash2 className="w-5 h-5" />
+      {/* Department Delete / Transfer / Archive Modal */}
+      {deptToDelete && (() => {
+        const countRooms = rooms.filter((r) => r.departmentId === deptToDelete.id).length;
+        const countItems = items.filter((i) => i.departmentId === deptToDelete.id).length;
+        const countUsers = users.filter((u) => u.departmentId === deptToDelete.id).length;
+        const isInUse = countRooms > 0 || countItems > 0 || countUsers > 0;
+        const alternativeDepts = departments.filter(
+          (d) => d.id !== deptToDelete.id && !d.isArchived
+        );
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-2xs animate-fade-in">
+            <div className="bg-white rounded-xl shadow-2xl max-w-md w-full border border-slate-300 overflow-hidden flex flex-col">
+              <div className="p-6 space-y-4">
+                <div className="flex items-center gap-3">
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
+                    isInUse ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-600'
+                  }`}>
+                    {isInUse ? <Archive className="w-5 h-5" /> : <Trash2 className="w-5 h-5" />}
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">
+                      {isInUse ? 'Naudojamo skyriaus tvarkymas' : 'Ištrinti skyrių / korpusą'}
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {isInUse ? 'Susietas turtas ar patalpos turi būti perleisti arba archyvuoti' : 'Veiksmas negrįžtamas'}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="text-sm font-bold text-slate-900">Ištrinti skyrių / korpusą</h3>
-                  <p className="text-xs text-slate-500 mt-0.5">Veiksmas negrįžtamas</p>
+
+                <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-xs space-y-1">
+                  <div className="font-bold text-slate-900">{deptToDelete.name} ({deptToDelete.code})</div>
+                  <div className="text-slate-600">{deptToDelete.building}</div>
                 </div>
-              </div>
 
-              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-xs space-y-1">
-                <div className="font-bold text-slate-900">{deptToDelete.name} ({deptToDelete.code})</div>
-                <div className="text-slate-600">{deptToDelete.building}</div>
-              </div>
-
-              <p className="text-xs text-slate-700 leading-relaxed">
-                Ar tikrai norite ištrinti skyrių <strong>„{deptToDelete.name}“ [{deptToDelete.code}]</strong>?
-              </p>
-
-              {(() => {
-                const countRooms = rooms.filter(r => r.departmentId === deptToDelete.id).length;
-                const countItems = items.filter(i => i.departmentId === deptToDelete.id).length;
-                if (countRooms > 0 || countItems > 0) {
-                  return (
-                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-xs">
-                      <strong>Įspėjimas:</strong> Šiam skyriui priskirti {countRooms} kabinetai(-ų) ir {countItems} turto vienetai(-ų). Ištrynus skyrių, susietos patalpos liks be skyriaus.
+                {isInUse ? (
+                  <div className="space-y-3">
+                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-xs leading-relaxed">
+                      <strong>Skyrius yra naudojamas:</strong> jam priskirti{' '}
+                      <strong>{countRooms}</strong> kabinetai(-ų), <strong>{countItems}</strong> turto vnt. ir{' '}
+                      <strong>{countUsers}</strong> darbuotojai(-ų). Tiesioginis ištrynimas užblokuotas, kad nebūtų prarasti ryšiai.
                     </div>
-                  );
-                }
-                return null;
-              })()}
-            </div>
 
-            <div className="px-6 py-3.5 bg-slate-100 border-t border-slate-200 flex items-center justify-end gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={() => setDeptToDelete(null)}
-                className="px-3.5 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-md cursor-pointer transition-colors shadow-2xs"
-              >
-                Atšaukti
-              </button>
-              <button
-                type="button"
-                onClick={executeDeleteDept}
-                className="px-4 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-md shadow-xs cursor-pointer transition-colors"
-              >
-                Taip, ištrinti skyrių
-              </button>
+                    {alternativeDepts.length > 0 && (
+                      <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-lg space-y-2 text-xs">
+                        <label className="block font-semibold text-blue-950">
+                          1 variantas: Perleisti visus kabinetus, turtą ir darbuotojus kitam skyriui ir ištrinti šį:
+                        </label>
+                        <select
+                          value={targetTransferDeptId}
+                          onChange={(e) => setTargetTransferDeptId(e.target.value)}
+                          className="w-full bg-white border border-blue-300 rounded px-2.5 py-1.5 text-xs"
+                        >
+                          {alternativeDepts.map((d) => (
+                            <option key={d.id} value={d.id}>
+                              {d.name} [{d.code}]
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={executeTransferAndDeleteDept}
+                          disabled={!targetTransferDeptId}
+                          className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-md cursor-pointer"
+                        >
+                          <ArrowRightLeft className="w-3.5 h-3.5" />
+                          <span>Perleisti ir ištrinti skyrių</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-700 leading-relaxed">
+                    Ar tikrai norite ištrinti skyrių <strong>„{deptToDelete.name}“ [{deptToDelete.code}]</strong>?
+                  </p>
+                )}
+              </div>
+
+              <div className="px-6 py-3.5 bg-slate-100 border-t border-slate-200 flex items-center justify-end gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setDeptToDelete(null)}
+                  className="px-3.5 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-md cursor-pointer transition-colors shadow-2xs"
+                >
+                  Atšaukti
+                </button>
+                <button
+                  type="button"
+                  onClick={() => executeArchiveDept(deptToDelete, true)}
+                  className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-bold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-md cursor-pointer transition-colors"
+                >
+                  <Archive className="w-3.5 h-3.5" />
+                  <span>Archyvuoti skyrių</span>
+                </button>
+                {!isInUse && (
+                  <button
+                    type="button"
+                    onClick={executeDeleteDept}
+                    className="px-4 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-md shadow-xs cursor-pointer transition-colors"
+                  >
+                    Taip, ištrinti skyrių
+                  </button>
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
-      {/* Room Delete Confirmation Modal */}
-      {roomToDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-2xs animate-fade-in">
-          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full border border-slate-300 overflow-hidden flex flex-col">
-            <div className="p-6 space-y-4">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
-                  <Trash2 className="w-5 h-5" />
+      {/* Room Delete / Transfer / Archive Modal */}
+      {roomToDelete && (() => {
+        const countItems = items.filter((i) => i.roomId === roomToDelete.id).length;
+        const countUsersAssigned = users.filter((u) =>
+          getUserAssignedRoomIds(u).includes(roomToDelete.id)
+        ).length;
+        const isInUse = countItems > 0 || countUsersAssigned > 0;
+        const alternativeRooms = rooms.filter((r) => r.id !== roomToDelete.id && !r.isArchived);
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-2xs animate-fade-in">
+            <div className="bg-white rounded-xl shadow-2xl max-w-md w-full border border-slate-300 overflow-hidden flex flex-col">
+              <div className="p-6 space-y-4">
+                <div className="flex items-center gap-3">
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
+                    isInUse ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-600'
+                  }`}>
+                    {isInUse ? <Archive className="w-5 h-5" /> : <Trash2 className="w-5 h-5" />}
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">
+                      {isInUse ? 'Naudojamos patalpos tvarkymas' : 'Ištrinti kabinetą / patalpą'}
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {isInUse ? 'Turtas turi būti perkeltas arba patalpa archyvuota' : 'Veiksmas negrįžtamas'}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="text-sm font-bold text-slate-900">Ištrinti kabinetą / patalpą</h3>
-                  <p className="text-xs text-slate-500 mt-0.5">Veiksmas negrįžtamas</p>
+
+                <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-xs space-y-1">
+                  <div className="font-bold text-slate-900">{formatRoomName(roomToDelete, true)}</div>
+                  <div className="text-slate-600">{roomToDelete.floor} aukštas</div>
                 </div>
-              </div>
 
-              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-xs space-y-1">
-                <div className="font-bold text-slate-900">{formatRoomName(roomToDelete, true)}</div>
-                <div className="text-slate-600">{roomToDelete.floor} aukštas</div>
-              </div>
-
-              <p className="text-xs text-slate-700 leading-relaxed">
-                Ar tikrai norite ištrinti kabinetą <strong>„{formatRoomName(roomToDelete, true)}“</strong>?
-              </p>
-
-              {(() => {
-                const countItems = items.filter(i => i.roomId === roomToDelete.id).length;
-                if (countItems > 0) {
-                  return (
-                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-xs">
-                      <strong>Įspėjimas:</strong> Šiame kabinete šiuo metu yra {countItems} registruoti turto vienetai(-ų). Ištrynus kabinetą, šie daiktai liks be patalpos.
+                {isInUse ? (
+                  <div className="space-y-3">
+                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-xs leading-relaxed">
+                      <strong>Kabinetas naudojamas:</strong> jame yra <strong>{countItems}</strong> turto vnt. ir{' '}
+                      <strong>{countUsersAssigned}</strong> darbuotojų priskyrimai. Negalima ištrinti neperleidus turto.
                     </div>
-                  );
-                }
-                return null;
-              })()}
-            </div>
 
-            <div className="px-6 py-3.5 bg-slate-100 border-t border-slate-200 flex items-center justify-end gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={() => setRoomToDelete(null)}
-                className="px-3.5 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-md cursor-pointer transition-colors shadow-2xs"
-              >
-                Atšaukti
-              </button>
-              <button
-                type="button"
-                onClick={executeDeleteRoom}
-                className="px-4 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-md shadow-xs cursor-pointer transition-colors"
-              >
-                Taip, ištrinti kabinetą
-              </button>
+                    {alternativeRooms.length > 0 && (
+                      <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-lg space-y-2 text-xs">
+                        <label className="block font-semibold text-blue-950">
+                          1 variantas: Perkelti turtą bei priskyrimus į kitą kabinetą ir ištrinti šį:
+                        </label>
+                        <select
+                          value={targetTransferRoomId}
+                          onChange={(e) => setTargetTransferRoomId(e.target.value)}
+                          className="w-full bg-white border border-blue-300 rounded px-2.5 py-1.5 text-xs"
+                        >
+                          {alternativeRooms.map((r) => {
+                            const rDept = departments.find((d) => d.id === r.departmentId);
+                            return (
+                              <option key={r.id} value={r.id}>
+                                {formatRoomName(r, true)} {rDept ? `[${rDept.code}]` : ''}
+                              </option>
+                            );
+                          })}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={executeTransferAndDeleteRoom}
+                          disabled={!targetTransferRoomId}
+                          className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-md cursor-pointer"
+                        >
+                          <ArrowRightLeft className="w-3.5 h-3.5" />
+                          <span>Perkelti turtą ir ištrinti kabinetą</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-700 leading-relaxed">
+                    Ar tikrai norite ištrinti kabinetą <strong>„{formatRoomName(roomToDelete, true)}“</strong>?
+                  </p>
+                )}
+              </div>
+
+              <div className="px-6 py-3.5 bg-slate-100 border-t border-slate-200 flex items-center justify-end gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setRoomToDelete(null)}
+                  className="px-3.5 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-md cursor-pointer transition-colors shadow-2xs"
+                >
+                  Atšaukti
+                </button>
+                <button
+                  type="button"
+                  onClick={() => executeArchiveRoom(roomToDelete, true)}
+                  className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-bold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-md cursor-pointer transition-colors"
+                >
+                  <Archive className="w-3.5 h-3.5" />
+                  <span>Archyvuoti kabinetą</span>
+                </button>
+                {!isInUse && (
+                  <button
+                    type="button"
+                    onClick={executeDeleteRoom}
+                    className="px-4 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-md shadow-xs cursor-pointer transition-colors"
+                  >
+                    Taip, ištrinti kabinetą
+                  </button>
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 };

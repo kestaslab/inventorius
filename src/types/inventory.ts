@@ -13,6 +13,7 @@ export interface User {
   avatarUrl?: string;
   pinCode?: string; // 4-6 skaitmenų PIN greitam prisijungimui
   isActive?: boolean; // ar vartotojas aktyvus, ar prieiga deaktyvuota
+  isArchived?: boolean; // ar darbuotojas archyvuotas (neberodomas aktyviuose priskyrimuose)
   allowedGmail?: string; // jei skiriasi nuo darbinio el. pašto
   lastLoginAt?: string;
 }
@@ -45,6 +46,7 @@ export interface Department {
   building: string;
   description: string;
   managerId?: string;
+  isArchived?: boolean;
 }
 
 export interface Room {
@@ -55,6 +57,7 @@ export interface Room {
   floor: number;
   defaultResponsiblePersonId?: string;
   notes?: string;
+  isArchived?: boolean;
 }
 
 export const formatRoomName = (room?: { number?: string; name: string } | null, withKabSuffix: boolean = false): string => {
@@ -192,6 +195,12 @@ export interface MovementRecord {
   toRoomId: string;
   fromUserId: string;
   toUserId: string;
+  fromDepartmentName?: string;
+  fromRoomName?: string;
+  fromUserName?: string;
+  toDepartmentName?: string;
+  toRoomName?: string;
+  toUserName?: string;
   date: string; // YYYY-MM-DD HH:mm
   reason: string;
   actNumber: string;

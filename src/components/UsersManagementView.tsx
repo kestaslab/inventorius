@@ -24,18 +24,35 @@ import {
   Play,
   X,
   Download,
-  DoorClosed
+  DoorClosed,
+  Archive,
+  RotateCcw,
+  ArrowRightLeft
 } from 'lucide-react';
-import { User, UserRole, Department, Room, AuthSettings, formatRoomName, getUserAssignedRoomIds } from '../types/inventory';
+import {
+  User,
+  UserRole,
+  Department,
+  Room,
+  InventoryItem,
+  AuditSession,
+  AuthSettings,
+  formatRoomName,
+  getUserAssignedRoomIds
+} from '../types/inventory';
 
 interface UsersManagementViewProps {
   users: User[];
   departments: Department[];
   rooms: Room[];
+  items: InventoryItem[];
+  auditSessions: AuditSession[];
   currentUser: User;
   authSettings: AuthSettings;
   onSaveUser: (user: User) => void;
   onDeleteUser: (userId: string) => void;
+  onTransferAndDeleteUser: (userId: string, targetUserId: string) => void;
+  onArchiveUser: (userId: string, isArchived: boolean) => void;
   onUpdateAuthSettings: (settings: AuthSettings) => void;
   onSwitchUser: (userId: string) => void;
   onOpenCreateUser: () => void;
@@ -47,10 +64,14 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
   users,
   departments,
   rooms,
+  items,
+  auditSessions,
   currentUser,
   authSettings,
   onSaveUser,
   onDeleteUser,
+  onTransferAndDeleteUser,
+  onArchiveUser,
   onUpdateAuthSettings,
   onSwitchUser,
   onOpenCreateUser,
@@ -59,6 +80,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [roleFilter, setRoleFilter] = useState<'all' | UserRole>('all');
+  const [showArchived, setShowArchived] = useState(false);
 
   // CSV Import Modal state
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
@@ -69,10 +91,14 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
 
   // In-app Delete Confirmation Modal state (prevents iframe alert/confirm issues)
   const [userToDelete, setUserToDelete] = useState<User | null>(null);
+  const [transferTargetUserId, setTransferTargetUserId] = useState('');
   const [actionFeedbackMsg, setActionFeedbackMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const archivedCount = users.filter((u) => u.isArchived).length;
 
   // Filtered users
   const filteredUsers = users.filter((u) => {
+    if (!showArchived && u.isArchived) return false;
     if (roleFilter !== 'all' && u.role !== roleFilter) return false;
     if (searchTerm) {
       const q = searchTerm.toLowerCase();
@@ -84,6 +110,13 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
     }
     return true;
   });
+
+  const openDeleteModal = (u: User) => {
+    const firstCandidate = users.find((cand) => cand.id !== u.id && !cand.isArchived && cand.isActive !== false)
+      || users.find((cand) => cand.id !== u.id && !cand.isArchived);
+    setTransferTargetUserId(firstCandidate?.id || '');
+    setUserToDelete(u);
+  };
 
   const handleToggleUserActive = (user: User) => {
     if (user.id === currentUser.id) {
@@ -347,6 +380,18 @@ Tomas Daukantas;tomas.d@tryskiumokykla.lt;Fizinio ugdymo mokytojas;teacher;S-01`
               <option value="teacher">Mokytojai / Atsakingi</option>
               <option value="auditor">Auditoriai</option>
             </select>
+
+            {archivedCount > 0 && (
+              <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-xs font-medium text-slate-700 cursor-pointer hover:bg-slate-100">
+                <input
+                  type="checkbox"
+                  checked={showArchived}
+                  onChange={(e) => setShowArchived(e.target.checked)}
+                  className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                />
+                <span>Rodyti archyvuotus ({archivedCount})</span>
+              </label>
+            )}
           </div>
 
           <div className="text-xs text-slate-500">
@@ -380,7 +425,7 @@ Tomas Daukantas;tomas.d@tryskiumokykla.lt;Fizinio ugdymo mokytojas;teacher;S-01`
                     key={u.id}
                     className={`hover:bg-slate-50/70 transition-colors ${
                       isCurrent ? 'bg-blue-50/30' : ''
-                    }`}
+                    } ${u.isArchived ? 'opacity-75 bg-slate-50/60' : ''}`}
                   >
                     {/* User info */}
                     <td 
@@ -398,6 +443,11 @@ Tomas Daukantas;tomas.d@tryskiumokykla.lt;Fizinio ugdymo mokytojas;teacher;S-01`
                             {isCurrent && (
                               <span className="text-[9px] bg-blue-600 text-white px-1.5 py-0.2 rounded font-semibold">
                                 Jūs
+                              </span>
+                            )}
+                            {u.isArchived && (
+                              <span className="text-[9px] bg-amber-100 text-amber-800 border border-amber-200 px-1.5 py-0.2 rounded font-semibold">
+                                Archyvuotas
                               </span>
                             )}
                           </div>
@@ -468,7 +518,12 @@ Tomas Daukantas;tomas.d@tryskiumokykla.lt;Fizinio ugdymo mokytojas;teacher;S-01`
 
                     {/* Status */}
                     <td className="py-2.5 px-3 whitespace-nowrap">
-                      {isActive ? (
+                      {u.isArchived ? (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-800 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                          <Archive className="w-3 h-3" />
+                          Archyvuotas
+                        </span>
+                      ) : isActive ? (
                         <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
                           <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
                           Aktyvus
@@ -484,7 +539,7 @@ Tomas Daukantas;tomas.d@tryskiumokykla.lt;Fizinio ugdymo mokytojas;teacher;S-01`
                     {/* Actions */}
                     <td className="py-2.5 px-3 text-right whitespace-nowrap">
                       <div className="flex items-center justify-end gap-1">
-                        {!isCurrent && (
+                        {!isCurrent && !u.isArchived && (
                           <button
                             onClick={() => onSwitchUser(u.id)}
                             title="Išbandyti sistemą šio mokytojo akimis"
@@ -505,21 +560,39 @@ Tomas Daukantas;tomas.d@tryskiumokykla.lt;Fizinio ugdymo mokytojas;teacher;S-01`
 
                         {!isCurrent && (
                           <>
-                            <button
-                              onClick={() => handleToggleUserActive(u)}
-                              title={isActive ? 'Deaktyvuoti prieigą (užblokuoti)' : 'Aktyvuoti prieigą'}
-                              className={`p-1.5 border rounded cursor-pointer transition-colors shadow-2xs ${
-                                isActive 
-                                  ? 'text-slate-500 hover:text-rose-600 border-slate-200 hover:bg-rose-50' 
-                                  : 'text-emerald-700 border-emerald-300 bg-emerald-50 hover:bg-emerald-100'
-                              }`}
-                            >
-                              <ShieldAlert className="w-3.5 h-3.5" />
-                            </button>
+                            {u.isArchived ? (
+                              <button
+                                onClick={() => {
+                                  onArchiveUser(u.id, false);
+                                  setActionFeedbackMsg({
+                                    type: 'success',
+                                    text: `Darbuotojas „${u.fullName}“ atkurtas iš archyvo.`,
+                                  });
+                                  setTimeout(() => setActionFeedbackMsg(null), 3000);
+                                }}
+                                title="Atkurti darbuotoją iš archyvo"
+                                className="inline-flex items-center gap-1 px-2 py-1 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md cursor-pointer transition-colors"
+                              >
+                                <RotateCcw className="w-3.5 h-3.5" />
+                                <span>Atkurti</span>
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => handleToggleUserActive(u)}
+                                title={isActive ? 'Deaktyvuoti prieigą (užblokuoti)' : 'Aktyvuoti prieigą'}
+                                className={`p-1.5 border rounded cursor-pointer transition-colors shadow-2xs ${
+                                  isActive 
+                                    ? 'text-slate-500 hover:text-rose-600 border-slate-200 hover:bg-rose-50' 
+                                    : 'text-emerald-700 border-emerald-300 bg-emerald-50 hover:bg-emerald-100'
+                                }`}
+                              >
+                                <ShieldAlert className="w-3.5 h-3.5" />
+                              </button>
+                            )}
 
                             <button
-                              onClick={() => setUserToDelete(u)}
-                              title="Pašalinti darbuotoją iš sistemos"
+                              onClick={() => openDeleteModal(u)}
+                              title="Pašalinti arba archyvuoti darbuotoją"
                               className="p-1.5 text-slate-500 hover:text-rose-600 border border-slate-300 hover:bg-rose-50 hover:border-rose-300 rounded cursor-pointer transition-colors shadow-2xs"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
@@ -646,60 +719,157 @@ Tomas Daukantas;tomas.d@tryskiumokykla.lt;Fizinio ugdymo mokytojas;teacher;S-01`
         </div>
       )}
 
-      {/* Delete User In-App Confirmation Modal */}
-      {userToDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-2xs animate-fade-in">
-          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full border border-slate-300 overflow-hidden flex flex-col">
-            <div className="p-6 space-y-4">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
-                  <Trash2 className="w-5 h-5" />
+      {/* Delete / Transfer / Archive User Modal */}
+      {userToDelete && (() => {
+        const linkedItemsCount = items.filter((i) => i.responsibleUserId === userToDelete.id).length;
+        const linkedRoomsCount = rooms.filter((r) => r.defaultResponsiblePersonId === userToDelete.id).length;
+        const linkedDeptsCount = departments.filter((d) => d.managerId === userToDelete.id).length;
+        const linkedAuditsCount = auditSessions.filter((s) => s.committeeChairmanId === userToDelete.id).length;
+        const isInUse = linkedItemsCount > 0 || linkedRoomsCount > 0 || linkedDeptsCount > 0 || linkedAuditsCount > 0;
+        const transferCandidates = users.filter((u) => u.id !== userToDelete.id && !u.isArchived);
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-2xs animate-fade-in">
+            <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full border border-slate-300 overflow-hidden flex flex-col">
+              <div className="p-6 space-y-4">
+                <div className="flex items-center gap-3">
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
+                    isInUse ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-600'
+                  }`}>
+                    {isInUse ? <AlertTriangle className="w-5 h-5" /> : <Trash2 className="w-5 h-5" />}
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">
+                      {isInUse ? 'Darbuotojui priskirtas turtas arba atsakomybės' : 'Pašalinti naudotoją iš sistemos'}
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {isInUse ? 'Tiesioginis šalinimas užblokuotas duomenų vientisumo apsaugai' : 'Veiksmas negrįžtamas'}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="text-sm font-bold text-slate-900">Pašalinti naudotoją iš sistemos</h3>
-                  <p className="text-xs text-slate-500 mt-0.5">Veiksmas negrįžtamas</p>
+
+                <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-xs space-y-1">
+                  <div className="font-bold text-slate-900">{userToDelete.fullName}</div>
+                  <div className="text-slate-600 font-mono">{userToDelete.email}</div>
+                  <div className="text-slate-500">{userToDelete.roleTitle}</div>
                 </div>
+
+                {isInUse ? (
+                  <div className="space-y-3">
+                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-950 space-y-1">
+                      <p className="font-semibold">
+                        Šiam darbuotojui vis dar priskirta:
+                      </p>
+                      <ul className="list-disc pl-4 space-y-0.5">
+                        {linkedItemsCount > 0 && <li><strong>{linkedItemsCount}</strong> materialiojo turto vnt.</li>}
+                        {linkedRoomsCount > 0 && <li><strong>{linkedRoomsCount}</strong> kabinetų vedėjo atsakomybės</li>}
+                        {linkedDeptsCount > 0 && <li><strong>{linkedDeptsCount}</strong> skyrių vadovavimas</li>}
+                        {linkedAuditsCount > 0 && <li><strong>{linkedAuditsCount}</strong> inventorizacijos komisijos pirmininko rolė</li>}
+                      </ul>
+                      <p className="pt-1 text-[11px] text-amber-900">
+                        Pasirinkite naują atsakingą darbuotoją atsakomybių perleidimui arba archyvuokite šį darbuotoją, kad dokumentų istorija liktų nepakitusi.
+                      </p>
+                    </div>
+
+                    {transferCandidates.length > 0 && (
+                      <div className="space-y-1.5">
+                        <label className="block text-xs font-semibold text-slate-700">
+                          Perleisti visą turtą ir atsakomybes šiam darbuotojui:
+                        </label>
+                        <select
+                          value={transferTargetUserId}
+                          onChange={(e) => setTransferTargetUserId(e.target.value)}
+                          className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        >
+                          <option value="">-- Pasirinkite darbuotoją --</option>
+                          {transferCandidates.map((cand) => (
+                            <option key={cand.id} value={cand.id}>
+                              {cand.fullName} ({cand.roleTitle})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-700 leading-relaxed">
+                    Ar tikrai norite pašalinti darbuotoją <strong>„{userToDelete.fullName}“</strong> iš gimnazijos darbuotojų sąrašo?
+                  </p>
+                )}
               </div>
 
-              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-xs space-y-1">
-                <div className="font-bold text-slate-900">{userToDelete.fullName}</div>
-                <div className="text-slate-600 font-mono">{userToDelete.email}</div>
-                <div className="text-slate-500">{userToDelete.roleTitle}</div>
+              <div className="px-6 py-3.5 bg-slate-100 border-t border-slate-200 flex flex-wrap items-center justify-end gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setUserToDelete(null)}
+                  className="px-3.5 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-md cursor-pointer transition-colors shadow-2xs"
+                >
+                  Atšaukti
+                </button>
+
+                {!userToDelete.isArchived && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onArchiveUser(userToDelete.id, true);
+                      const archivedName = userToDelete.fullName;
+                      setUserToDelete(null);
+                      setActionFeedbackMsg({
+                        type: 'success',
+                        text: `Darbuotojas „${archivedName}“ archyvuotas.`,
+                      });
+                      setTimeout(() => setActionFeedbackMsg(null), 3000);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-md cursor-pointer transition-colors"
+                  >
+                    <Archive className="w-3.5 h-3.5" />
+                    <span>Archyvuoti</span>
+                  </button>
+                )}
+
+                {isInUse ? (
+                  <button
+                    type="button"
+                    disabled={!transferTargetUserId}
+                    onClick={() => {
+                      if (!transferTargetUserId) return;
+                      onTransferAndDeleteUser(userToDelete.id, transferTargetUserId);
+                      const deletedName = userToDelete.fullName;
+                      setUserToDelete(null);
+                      setActionFeedbackMsg({
+                        type: 'success',
+                        text: `Darbuotojo „${deletedName}“ turtas ir atsakomybės sėkmingai perleisti, o paskyra pašalinta.`,
+                      });
+                      setTimeout(() => setActionFeedbackMsg(null), 3500);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-md shadow-xs cursor-pointer transition-colors"
+                  >
+                    <ArrowRightLeft className="w-3.5 h-3.5" />
+                    <span>Perleisti ir pašalinti</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onDeleteUser(userToDelete.id);
+                      const deletedName = userToDelete.fullName;
+                      setUserToDelete(null);
+                      setActionFeedbackMsg({
+                        type: 'success',
+                        text: `Naudotojas „${deletedName}“ sėkmingai pašalintas iš sistemos.`,
+                      });
+                      setTimeout(() => setActionFeedbackMsg(null), 3000);
+                    }}
+                    className="px-4 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-md shadow-xs cursor-pointer transition-colors"
+                  >
+                    Taip, pašalinti
+                  </button>
+                )}
               </div>
-
-              <p className="text-xs text-slate-700 leading-relaxed">
-                Ar tikrai norite pašalinti darbuotoją <strong>„{userToDelete.fullName}“</strong> iš gimnazijos darbuotojų sąrašo?
-              </p>
-            </div>
-
-            <div className="px-6 py-3.5 bg-slate-100 border-t border-slate-200 flex items-center justify-end gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={() => setUserToDelete(null)}
-                className="px-3.5 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-md cursor-pointer transition-colors shadow-2xs"
-              >
-                Atšaukti
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  onDeleteUser(userToDelete.id);
-                  const deletedName = userToDelete.fullName;
-                  setUserToDelete(null);
-                  setActionFeedbackMsg({
-                    type: 'success',
-                    text: `Naudotojas „${deletedName}“ sėkmingai pašalintas iš sistemos.`,
-                  });
-                  setTimeout(() => setActionFeedbackMsg(null), 3000);
-                }}
-                className="px-4 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-md shadow-xs cursor-pointer transition-colors"
-              >
-                Taip, pašalinti
-              </button>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 };

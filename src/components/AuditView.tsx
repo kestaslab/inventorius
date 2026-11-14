@@ -88,11 +88,33 @@ export const AuditView: React.FC<AuditViewProps> = ({
   const [orderDate, setOrderDate] = useState(auditSession.orderDate || new Date().toISOString().split('T')[0]);
   const [sessionNotes, setSessionNotes] = useState(auditSession.notes || '');
 
-  // Filtered rooms depending on selected department
+  // Filtered rooms depending on selected department (skip archived empty rooms)
+  const visibleRooms = useMemo(
+    () =>
+      rooms.filter(
+        (r) =>
+          !r.isArchived ||
+          r.id === selectedRoomId ||
+          items.some((i) => i.roomId === r.id)
+      ),
+    [rooms, items, selectedRoomId]
+  );
+
+  const visibleDepartments = useMemo(
+    () =>
+      departments.filter(
+        (d) =>
+          !d.isArchived ||
+          d.id === selectedDeptId ||
+          items.some((i) => i.departmentId === d.id)
+      ),
+    [departments, items, selectedDeptId]
+  );
+
   const availableRooms = useMemo(() => {
-    if (selectedDeptId === 'all') return rooms;
-    return rooms.filter(r => r.departmentId === selectedDeptId);
-  }, [rooms, selectedDeptId]);
+    if (selectedDeptId === 'all') return visibleRooms;
+    return visibleRooms.filter(r => r.departmentId === selectedDeptId);
+  }, [visibleRooms, selectedDeptId]);
 
   // Ensure selectedRoomId belongs to available rooms
   const activeRoom = useMemo(() => {
@@ -373,14 +395,14 @@ export const AuditView: React.FC<AuditViewProps> = ({
               {selectedDeptId === 'all' && <Check className="w-3.5 h-3.5 text-blue-600 shrink-0" />}
             </div>
             <div className="mt-1 flex items-center justify-between text-[11px] text-slate-500">
-              <span>{rooms.length} kabinetai</span>
+              <span>{visibleRooms.length} kabinetai</span>
               <span className="font-mono font-medium">{auditSession.scannedItemIds.length} / {items.length} vnt.</span>
             </div>
           </button>
 
-          {departments.map(dept => {
+          {visibleDepartments.map(dept => {
             const isSelected = selectedDeptId === dept.id;
-            const deptRooms = rooms.filter(r => r.departmentId === dept.id);
+            const deptRooms = visibleRooms.filter(r => r.departmentId === dept.id);
             const deptItemCount = items.filter(i => i.departmentId === dept.id).length;
             const deptScanned = items.filter(i => i.departmentId === dept.id && scannedSet.has(i.id)).length;
             const pct = deptItemCount > 0 ? Math.round((deptScanned / deptItemCount) * 100) : 0;
@@ -736,11 +758,13 @@ export const AuditView: React.FC<AuditViewProps> = ({
                   }}
                   className="w-full bg-white border border-blue-300 rounded-lg px-3 py-2 text-xs font-semibold text-slate-900 cursor-pointer shadow-2xs"
                 >
-                  {users.map(u => (
-                    <option key={u.id} value={u.id}>
-                      {u.fullName} — {u.roleTitle || (u.role === 'admin' ? 'Ūkio vedėjas / IT' : 'Darbuotojas')}
-                    </option>
-                  ))}
+                  {users
+                    .filter((u) => (!u.isArchived && u.isActive !== false) || u.id === chairmanId)
+                    .map(u => (
+                      <option key={u.id} value={u.id}>
+                        {u.fullName} — {u.roleTitle || (u.role === 'admin' ? 'Ūkio vedėjas / IT' : 'Darbuotojas')}{u.isArchived ? ' [Archyvuotas]' : ''}
+                      </option>
+                    ))}
                 </select>
 
                 <div className="pt-1">
@@ -839,7 +863,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
                     Pasirinkti iš gimnazijos darbuotojų sąrašo:
                   </span>
                   <div className="border border-slate-300 rounded-lg p-2.5 max-h-36 overflow-y-auto bg-slate-50 space-y-1">
-                    {users.map(u => {
+                    {users.filter((u) => !u.isArchived && u.isActive !== false).map(u => {
                       const isSelected = selectedMemberNames.some(m => 
                         m.toLowerCase().includes(u.fullName.toLowerCase())
                       );

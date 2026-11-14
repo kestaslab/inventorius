@@ -39,6 +39,7 @@ import {
   formatRoomName
 } from '../types/inventory';
 import { compressPhoto } from '../utils/imageCompressor';
+import { StorageService } from '../utils/storage';
 import { formatAgeDisplay } from './InventoryListView';
 import { directPrintBrotherLabels } from '../utils/brotherPrinter';
 
@@ -71,6 +72,8 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
 }) => {
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [isCompressing, setIsCompressing] = useState(false);
+  const [photoError, setPhotoError] = useState('');
+  const [confirmRemovePhoto, setConfirmRemovePhoto] = useState(false);
   const [activeMediaTab, setActiveMediaTab] = useState<'photo' | 'qr' | 'barcode'>('photo');
 
   const barcodeRef = useRef<SVGSVGElement | null>(null);
@@ -147,12 +150,19 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
+    setPhotoError('');
     try {
       setIsCompressing(true);
       const compressedBase64 = await compressPhoto(file, 800, 0.75);
-      onEdit({ ...item, photoUrl: compressedBase64 });
+      const uploaded = await StorageService.uploadPhoto(compressedBase64);
+      if (!uploaded.ok) {
+        setPhotoError(uploaded.error);
+        return;
+      }
+      onEdit({ ...item, photoUrl: uploaded.url });
       setActiveMediaTab('photo');
     } catch (err) {
+      setPhotoError('Nepavyko apdoroti nuotraukos. Pabandykite kitą failą.');
       console.error('Photo error', err);
     } finally {
       setIsCompressing(false);
@@ -161,9 +171,8 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
   };
 
   const handleRemovePhoto = () => {
-    if (confirm('Ar tikrai norite pašalinti šio daikto nuotrauką?')) {
-      onEdit({ ...item, photoUrl: undefined });
-    }
+    setConfirmRemovePhoto(false);
+    onEdit({ ...item, photoUrl: undefined });
   };
 
   return (
@@ -265,20 +274,43 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
                       <img src={item.photoUrl} alt={item.name} className="w-full h-full object-cover" />
                     </div>
                     {canManage && (
-                      <div className="flex items-center justify-center gap-2 text-[11px]">
-                        <button
-                          onClick={() => cameraInputRef.current?.click()}
-                          className="text-blue-600 hover:text-blue-800 font-medium cursor-pointer"
-                        >
-                          Perfografuoti
-                        </button>
-                        <span className="text-slate-300">·</span>
-                        <button
-                          onClick={handleRemovePhoto}
-                          className="text-rose-600 hover:text-rose-800 font-medium cursor-pointer"
-                        >
-                          Pašalinti
-                        </button>
+                      confirmRemovePhoto ? (
+                        <div className="flex items-center justify-center gap-2 text-[11px] bg-rose-50 border border-rose-200 rounded px-2 py-1">
+                          <span className="text-rose-800 font-medium">Pašalinti?</span>
+                          <button
+                            onClick={handleRemovePhoto}
+                            className="text-rose-700 hover:text-rose-900 font-bold cursor-pointer"
+                          >
+                            Taip
+                          </button>
+                          <button
+                            onClick={() => setConfirmRemovePhoto(false)}
+                            className="text-slate-600 hover:text-slate-800 font-medium cursor-pointer"
+                          >
+                            Ne
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-center gap-2 text-[11px]">
+                          <button
+                            onClick={() => cameraInputRef.current?.click()}
+                            className="text-blue-600 hover:text-blue-800 font-medium cursor-pointer"
+                          >
+                            Perfografuoti
+                          </button>
+                          <span className="text-slate-300">·</span>
+                          <button
+                            onClick={() => setConfirmRemovePhoto(true)}
+                            className="text-rose-600 hover:text-rose-800 font-medium cursor-pointer"
+                          >
+                            Pašalinti
+                          </button>
+                        </div>
+                      )
+                    )}
+                    {photoError && (
+                      <div className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded p-1.5">
+                        {photoError}
                       </div>
                     )}
                   </div>
@@ -506,15 +538,25 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
             </div>
           ) : (
             <div className="space-y-1.5 text-xs">
-              {itemMovements.map(m => (
-                <div key={m.id} className="p-2 bg-slate-50 rounded border border-slate-100 flex items-center justify-between">
-                  <div>
-                    <span className="font-mono text-slate-500">{m.date}</span>
-                    <span className="mx-2 font-mono font-medium text-blue-600">[{m.actNumber}]</span>
-                    <span className="text-slate-800">{m.reason}</span>
+              {itemMovements.map(m => {
+                const fromRoomText = m.fromRoomName || formatRoomName(rooms.find(r => r.id === m.fromRoomId), true);
+                const toRoomText = m.toRoomName || formatRoomName(rooms.find(r => r.id === m.toRoomId), true);
+                const fromUserText = m.fromUserName || users.find(u => u.id === m.fromUserId)?.fullName;
+                const toUserText = m.toUserName || users.find(u => u.id === m.toUserId)?.fullName;
+
+                return (
+                  <div key={m.id} className="p-2.5 bg-slate-50 rounded border border-slate-100 space-y-1">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                      <span className="font-mono text-slate-500">{m.date}</span>
+                      <span className="font-mono font-medium text-blue-600">[{m.actNumber}]</span>
+                      <span className="text-slate-800">{m.reason}</span>
+                    </div>
+                    <div className="text-[11px] text-slate-500">
+                      {fromRoomText}{fromUserText ? ` (${fromUserText})` : ''} → <span className="text-slate-700 font-medium">{toRoomText}{toUserText ? ` (${toUserText})` : ''}</span>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

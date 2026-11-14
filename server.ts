@@ -1,7 +1,7 @@
-import express from 'express';
-import fs from 'fs';
+import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createDatabaseApiRouter } from './src/server/databaseApi.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -9,55 +9,30 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '25mb' }));
+
+// Globalus JSON ir 413 dydžio klaidų apdorojimas po express.json()
+app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+  if (err && (err.type === 'entity.too.large' || err.status === 413)) {
+    return res.status(413).json({
+      success: false,
+      code: 'PAYLOAD_TOO_LARGE',
+      error:
+        'Užklausos arba failo dydis viršija serverio limitą (25 MB). Sumažinkite nuotrauką arba failą.',
+    });
+  }
+  if (err && err instanceof SyntaxError && 'body' in err) {
+    return res.status(400).json({
+      success: false,
+      error: 'Netinkamas JSON užklausos formatas.',
+    });
+  }
+  return next(err);
+});
 
 // Dedicated server-side data directory (survives git pulls and rebuilds)
 const DATA_DIR = path.join(__dirname, 'data');
-const DB_FILE = path.join(DATA_DIR, 'school_database.json');
-
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
-
-// API Health Check
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    serverTime: new Date().toISOString(),
-    dbExists: fs.existsSync(DB_FILE)
-  });
-});
-
-// API: Get central database from Proxmox server disk
-app.get('/api/database', (req, res) => {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const content = fs.readFileSync(DB_FILE, 'utf-8');
-      return res.setHeader('Content-Type', 'application/json').send(content);
-    }
-    return res.json(null);
-  } catch (err) {
-    console.error('Klaida skaitant duomenų bazę:', err);
-    return res.status(500).json({ error: 'Failed to read server database' });
-  }
-});
-
-// API: Save central database to Proxmox server disk (atomic write)
-app.post('/api/database', (req, res) => {
-  try {
-    const data = req.body;
-    if (!data) {
-      return res.status(400).json({ error: 'Missing data payload' });
-    }
-    const tempFile = path.join(DATA_DIR, `school_db_${Date.now()}.tmp`);
-    fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), 'utf-8');
-    fs.renameSync(tempFile, DB_FILE);
-    return res.json({ success: true, savedAt: new Date().toISOString() });
-  } catch (err) {
-    console.error('Klaida įrašant duomenų bazę:', err);
-    return res.status(500).json({ error: 'Failed to persist server database' });
-  }
-});
+app.use(createDatabaseApiRouter({ dataDir: DATA_DIR }));
 
 // Full-stack Vite dev vs Production handling
 const isProduction = process.env.NODE_ENV === 'production';
@@ -73,7 +48,7 @@ async function startServer() {
   } else {
     const distDir = path.join(__dirname, 'dist');
     app.use(express.static(distDir));
-    app.get('*', (req, res) => {
+    app.get('*', (_req, res) => {
       res.sendFile(path.join(distDir, 'index.html'));
     });
   }
@@ -83,7 +58,7 @@ async function startServer() {
   });
 }
 
-startServer().catch(err => {
+startServer().catch((err) => {
   console.error('Serverio startavimo klaida:', err);
   process.exit(1);
 });

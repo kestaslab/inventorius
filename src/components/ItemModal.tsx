@@ -77,6 +77,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
     photoUrl: '',
   });
 
+  const [residualInput, setResidualInput] = useState<string>('');
   const [specs, setSpecs] = useState<ComputerSpecs>({});
   const [showSpecsSection, setShowSpecsSection] = useState<boolean>(true);
 
@@ -85,28 +86,50 @@ export const ItemModal: React.FC<ItemModalProps> = ({
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scrollBodyRef = useRef<HTMLDivElement | null>(null);
+  const prevInitKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
+    if (!isOpen) {
+      prevInitKeyRef.current = null;
+      return;
+    }
+    const initKey = editingItem ? `edit:${editingItem.id}` : 'create';
+    if (prevInitKeyRef.current === initKey) return;
+    prevInitKeyRef.current = initKey;
+
+    setValidationError('');
     if (editingItem) {
       setFormData({
         ...editingItem,
-        assetClass: editingItem.assetClass || (Number(editingItem.purchasePrice) >= LONG_TERM_THRESHOLD ? 'long_term' : 'short_term'),
+        assetClass:
+          editingItem.assetClass ||
+          (Number(editingItem.purchasePrice) >= LONG_TERM_THRESHOLD ? 'long_term' : 'short_term'),
         fundingSource: editingItem.fundingSource || 'school',
       });
+      setResidualInput(
+        editingItem.residualValue !== undefined ? String(editingItem.residualValue) : ''
+      );
       setSpecs(editingItem.specs || {});
       setShowSpecsSection(editingItem.category === 'Kompiuteriai' || !!editingItem.specs);
     } else {
-      // Auto generate next inventory number for current year
       const autoInv = StorageService.generateNextInventoryNumber(allItems);
       const defaultPrice = 250;
+      const firstActiveDept = departments.find((d) => !d.isArchived) || departments[0];
+      const firstActiveRoom =
+        rooms.find((r) => !r.isArchived && r.departmentId === firstActiveDept?.id) ||
+        rooms.find((r) => !r.isArchived) ||
+        rooms[0];
+      const firstActiveUser =
+        users.find((u) => !u.isArchived && u.isActive !== false) || users[0];
+
       setFormData({
         inventoryNumber: autoInv,
         serialNumber: '',
         name: '',
         category: 'Kompiuteriai',
-        departmentId: departments[0]?.id || '',
-        roomId: rooms[0]?.id || '',
-        responsibleUserId: users[0]?.id || '',
+        departmentId: firstActiveDept?.id || '',
+        roomId: firstActiveRoom?.id || '',
+        responsibleUserId: firstActiveUser?.id || '',
         acquisitionDate: new Date().toISOString().slice(0, 10),
         purchasePrice: defaultPrice,
         residualValue: defaultPrice,
@@ -117,25 +140,30 @@ export const ItemModal: React.FC<ItemModalProps> = ({
         notes: '',
         photoUrl: '',
       });
+      setResidualInput(String(defaultPrice));
       setSpecs({});
       setShowSpecsSection(true);
     }
-    // Always reset scroll to top so inventory number and serial number are immediately visible
-    if (isOpen) {
-      setTimeout(() => {
-        scrollBodyRef.current?.scrollTo({ top: 0, behavior: 'instant' });
-      }, 0);
-    }
+
+    setTimeout(() => {
+      scrollBodyRef.current?.scrollTo({ top: 0, behavior: 'instant' });
+    }, 0);
   }, [editingItem, allItems, departments, rooms, users, isOpen]);
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    setValidationError('');
     try {
       setIsCompressing(true);
       const compressedBase64 = await compressPhoto(file, 800, 0.75);
-      setFormData(prev => ({ ...prev, photoUrl: compressedBase64 }));
+      const uploaded = await StorageService.uploadPhoto(compressedBase64);
+      if (!uploaded.ok) {
+        setValidationError(uploaded.error);
+        return;
+      }
+      setFormData(prev => ({ ...prev, photoUrl: uploaded.url }));
     } catch (err) {
       setValidationError('Nepavyko apdoroti nuotraukos. Pabandykite kitą failą.');
       console.error(err);
@@ -163,7 +191,27 @@ export const ItemModal: React.FC<ItemModalProps> = ({
     'Kita',
   ];
 
-  const availableRooms = rooms.filter(r => !formData.departmentId || r.departmentId === formData.departmentId);
+  const selectableDepartments = departments.filter(
+    (d) => !d.isArchived || d.id === formData.departmentId
+  );
+  const availableRooms = rooms.filter(
+    (r) =>
+      r.departmentId === formData.departmentId &&
+      (!r.isArchived || r.id === formData.roomId)
+  );
+  const selectableUsers = users.filter(
+    (u) => (!u.isArchived && u.isActive !== false) || u.id === formData.responsibleUserId
+  );
+
+  const isStatusLockedByWorkflow =
+    editingItem?.status === 'to_writeoff' || editingItem?.status === 'written_off';
+
+  const locationOrOwnerChanged = Boolean(
+    editingItem &&
+      (editingItem.departmentId !== formData.departmentId ||
+        editingItem.roomId !== formData.roomId ||
+        editingItem.responsibleUserId !== formData.responsibleUserId)
+  );
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -180,46 +228,143 @@ export const ItemModal: React.FC<ItemModalProps> = ({
 
     // Check duplicate inventory number if new or changed
     const isDuplicate = allItems.some(
-      i => i.inventoryNumber.trim().toUpperCase() === formData.inventoryNumber?.trim().toUpperCase() &&
-           (!editingItem || i.id !== editingItem.id)
+      (i) =>
+        i.inventoryNumber.trim().toUpperCase() === formData.inventoryNumber?.trim().toUpperCase() &&
+        (!editingItem || i.id !== editingItem.id)
     );
     if (isDuplicate) {
-      setValidationError(`Inventorinis numeris "${formData.inventoryNumber}" jau priskirtas kitam daiktui!`);
+      setValidationError(
+        `Inventorinis numeris "${formData.inventoryNumber}" jau priskirtas kitam daiktui!`
+      );
       return;
     }
 
-    const price = Number(formData.purchasePrice) || 0;
-    const computedClass: AssetClass = formData.assetClass || (price >= LONG_TERM_THRESHOLD ? 'long_term' : 'short_term');
+    // Check location integrity
+    const selectedDept = departments.find((d) => d.id === formData.departmentId);
+    if (!selectedDept) {
+      setValidationError('Pasirinkite galiojantį skyrių.');
+      return;
+    }
+    if (!formData.roomId) {
+      setValidationError(
+        'Pasirinktame skyriuje nėra kabinetų arba kabinetas nepasirinktas. Pirmiausia sukurkite kabinetą.'
+      );
+      return;
+    }
+    const selectedRoom = rooms.find((r) => r.id === formData.roomId);
+    if (!selectedRoom || selectedRoom.departmentId !== selectedDept.id) {
+      setValidationError(
+        `Pasirinktas kabinetas nepriklauso skyriui „${selectedDept.name}“. Pasirinkite teisingą kabinetą.`
+      );
+      return;
+    }
+    if (!formData.responsibleUserId || !users.some((u) => u.id === formData.responsibleUserId)) {
+      setValidationError('Pasirinkite materialiai atsakingą asmenį.');
+      return;
+    }
+
+    // Validate date
+    const acqDate = (formData.acquisitionDate || '').trim();
+    const todayStr = new Date().toISOString().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(acqDate)) {
+      setValidationError('Įveskite teisingą įsigijimo datą (YYYY-MM-DD).');
+      return;
+    }
+    const [y, m, d] = acqDate.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    if (
+      y < 1950 ||
+      dt.getUTCFullYear() !== y ||
+      dt.getUTCMonth() !== m - 1 ||
+      dt.getUTCDate() !== d
+    ) {
+      setValidationError('Įsigijimo data yra neteisinga.');
+      return;
+    }
+    if (acqDate > todayStr) {
+      setValidationError('Įsigijimo data negali būti ateityje.');
+      return;
+    }
+
+    // Validate purchasePrice and residualValue
+    const rawPrice = Number(formData.purchasePrice);
+    if (!Number.isFinite(rawPrice) || rawPrice < 0) {
+      setValidationError('Įsigijimo kaina negali būti neigiama.');
+      return;
+    }
+    let parsedResidual: number | undefined;
+    if (residualInput.trim() !== '') {
+      const rVal = Number(residualInput);
+      if (!Number.isFinite(rVal) || rVal < 0) {
+        setValidationError('Likutinė vertė negali būti neigiama.');
+        return;
+      }
+      if (rVal > rawPrice) {
+        setValidationError(
+          `Likutinė vertė (${rVal.toFixed(2)} €) negali viršyti įsigijimo kainos (${rawPrice.toFixed(2)} €).`
+        );
+        return;
+      }
+      parsedResidual = rVal;
+    }
+
+    // Validate status does not bypass write-off / restore procedures
+    const targetStatus: ItemStatus = isStatusLockedByWorkflow
+      ? editingItem!.status
+      : ((formData.status as ItemStatus) || 'active');
+    if (!isStatusLockedByWorkflow && (targetStatus === 'to_writeoff' || targetStatus === 'written_off')) {
+      setValidationError(
+        'Būsenos „Teikiamas nurašyti“ ir „Nurašytas“ nustatomos tik per oficialią nurašymo procedūrą.'
+      );
+      return;
+    }
+
+    const computedClass: AssetClass =
+      formData.assetClass || (rawPrice >= LONG_TERM_THRESHOLD ? 'long_term' : 'short_term');
+
+    const hasSpecs = Boolean(
+      specs.computerType ||
+        specs.cpu?.trim() ||
+        specs.ramGb ||
+        specs.storage?.trim() ||
+        specs.os?.trim() ||
+        specs.screenSize?.trim() ||
+        specs.gpu?.trim() ||
+        specs.macAddress?.trim()
+    );
 
     const itemToSave: InventoryItem = {
+      ...(editingItem || {}),
       id: editingItem?.id || `item-${Date.now()}`,
       inventoryNumber: formData.inventoryNumber.trim().toUpperCase(),
       serialNumber: formData.serialNumber?.trim() || undefined,
       name: formData.name.trim(),
       category: (formData.category as ItemCategory) || 'Kita',
-      departmentId: formData.departmentId || departments[0]?.id || '',
-      roomId: formData.roomId || rooms[0]?.id || '',
-      responsibleUserId: formData.responsibleUserId || users[0]?.id || '',
-      acquisitionDate: formData.acquisitionDate || new Date().toISOString().slice(0, 10),
-      purchasePrice: price,
-      residualValue: Number(formData.residualValue ?? price) || 0,
+      departmentId: selectedDept.id,
+      roomId: selectedRoom.id,
+      responsibleUserId: formData.responsibleUserId,
+      acquisitionDate: acqDate,
+      purchasePrice: rawPrice,
+      residualValue: parsedResidual,
       assetClass: computedClass,
       fundingSource: (formData.fundingSource as FundingSource) || 'school',
-      status: (formData.status as ItemStatus) || 'active',
+      status: targetStatus,
       condition: (formData.condition as ItemCondition) || 'good',
       notes: formData.notes?.trim() || undefined,
       photoUrl: formData.photoUrl || undefined,
       lastAuditDate: editingItem?.lastAuditDate,
-      specs: (specs.computerType || specs.cpu?.trim() || specs.ramGb || specs.storage?.trim() || specs.os?.trim() || specs.screenSize?.trim() || specs.gpu?.trim() || specs.macAddress?.trim()) ? {
-        computerType: specs.computerType,
-        cpu: specs.cpu?.trim() || undefined,
-        ramGb: specs.ramGb ? Number(specs.ramGb) : undefined,
-        storage: specs.storage?.trim() || undefined,
-        os: specs.os?.trim() || undefined,
-        screenSize: specs.screenSize?.trim() || undefined,
-        gpu: specs.gpu?.trim() || undefined,
-        macAddress: specs.macAddress?.trim() || undefined,
-      } : undefined,
+      specs: hasSpecs
+        ? {
+            computerType: specs.computerType,
+            cpu: specs.cpu?.trim() || undefined,
+            ramGb: specs.ramGb ? Number(specs.ramGb) : undefined,
+            storage: specs.storage?.trim() || undefined,
+            os: specs.os?.trim() || undefined,
+            screenSize: specs.screenSize?.trim() || undefined,
+            gpu: specs.gpu?.trim() || undefined,
+            macAddress: specs.macAddress?.trim() || undefined,
+          }
+        : undefined,
     };
 
     onSave(itemToSave);
@@ -565,17 +710,21 @@ export const ItemModal: React.FC<ItemModalProps> = ({
                 value={formData.departmentId}
                 onChange={(e) => {
                   const newDeptId = e.target.value;
-                  const firstRoomInDept = rooms.find(r => r.departmentId === newDeptId);
-                  setFormData({ 
-                    ...formData, 
+                  const firstRoomInDept = rooms.find(
+                    (r) => !r.isArchived && r.departmentId === newDeptId
+                  );
+                  setFormData({
+                    ...formData,
                     departmentId: newDeptId,
-                    roomId: firstRoomInDept?.id || ''
+                    roomId: firstRoomInDept?.id || '',
                   });
                 }}
                 className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500"
               >
-                {departments.map((d) => (
-                  <option key={d.id} value={d.id}>{d.name}</option>
+                {selectableDepartments.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}{d.isArchived ? ' (Archyvuotas)' : ''}
+                  </option>
                 ))}
               </select>
             </div>
@@ -586,22 +735,36 @@ export const ItemModal: React.FC<ItemModalProps> = ({
               </label>
               <select
                 value={formData.roomId}
+                disabled={availableRooms.length === 0}
                 onChange={(e) => {
                   const rId = e.target.value;
-                  const foundRoom = rooms.find(r => r.id === rId);
-                  setFormData({ 
-                    ...formData, 
+                  const foundRoom = rooms.find((r) => r.id === rId);
+                  setFormData({
+                    ...formData,
                     roomId: rId,
-                    // If room has default responsible user, suggest them
-                    responsibleUserId: foundRoom?.defaultResponsiblePersonId || formData.responsibleUserId
+                    responsibleUserId:
+                      !editingItem && foundRoom?.defaultResponsiblePersonId
+                        ? foundRoom.defaultResponsiblePersonId
+                        : formData.responsibleUserId,
                   });
                 }}
-                className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500"
+                className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500 disabled:bg-slate-100 disabled:text-slate-500"
               >
-                {availableRooms.map((r) => (
-                  <option key={r.id} value={r.id}>{formatRoomName(r)}</option>
-                ))}
+                {availableRooms.length === 0 ? (
+                  <option value="">Šiame skyriuje nėra kabinetų</option>
+                ) : (
+                  availableRooms.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {formatRoomName(r)}{r.isArchived ? ' (Archyvuotas)' : ''}
+                    </option>
+                  ))
+                )}
               </select>
+              {availableRooms.length === 0 && (
+                <p className="text-[10px] text-amber-700 mt-1">
+                  Pasirinktame skyriuje nėra aktyvių kabinetų. Sukurkite kabinetą skyrių valdyme.
+                </p>
+              )}
             </div>
           </div>
 
@@ -615,14 +778,21 @@ export const ItemModal: React.FC<ItemModalProps> = ({
               onChange={(e) => setFormData({ ...formData, responsibleUserId: e.target.value })}
               className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500"
             >
-              {users.map((u) => (
-                <option key={u.id} value={u.id}>{u.fullName} ({u.roleTitle})</option>
+              {selectableUsers.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.fullName} ({u.roleTitle}){u.isArchived ? ' [Archyvuotas]' : ''}
+                </option>
               ))}
             </select>
+            {locationOrOwnerChanged && (
+              <p className="text-[10px] text-blue-700 mt-1 font-medium">
+                Pakeitus skyrių, kabinetą arba atsakingą asmenį, sistemoje bus automatiškai sukurtas įrašas judėjimo istorijoje.
+              </p>
+            )}
           </div>
 
           {/* Dates & Prices */}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
               <label className="block text-slate-700 font-medium mb-1">
                 Įsigijimo data *
@@ -630,6 +800,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
               <input
                 type="date"
                 required
+                max={new Date().toISOString().slice(0, 10)}
                 value={formData.acquisitionDate}
                 onChange={(e) => setFormData({ ...formData, acquisitionDate: e.target.value })}
                 className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 focus:ring-1 focus:ring-blue-500"
@@ -645,16 +816,40 @@ export const ItemModal: React.FC<ItemModalProps> = ({
                 step="0.01"
                 min="0"
                 required
-                value={formData.purchasePrice}
+                value={formData.purchasePrice ?? ''}
                 onChange={(e) => {
-                  const val = Number(e.target.value);
-                  const autoClass: AssetClass = val >= LONG_TERM_THRESHOLD ? 'long_term' : 'short_term';
-                  setFormData({ 
-                    ...formData, 
-                    purchasePrice: val,
-                    assetClass: autoClass
-                  });
+                  const val = e.target.value === '' ? 0 : Number(e.target.value);
+                  if (!editingItem) {
+                    const autoClass: AssetClass =
+                      val >= LONG_TERM_THRESHOLD ? 'long_term' : 'short_term';
+                    setFormData({
+                      ...formData,
+                      purchasePrice: val,
+                      assetClass: autoClass,
+                    });
+                  } else {
+                    setFormData({
+                      ...formData,
+                      purchasePrice: val,
+                    });
+                  }
                 }}
+                className="w-full font-mono bg-white border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500 text-right font-medium"
+              />
+            </div>
+
+            <div>
+              <label className="block text-slate-700 font-medium mb-1">
+                Likutinė vertė (€)
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                max={Number(formData.purchasePrice) >= 0 ? Number(formData.purchasePrice) : undefined}
+                value={residualInput}
+                onChange={(e) => setResidualInput(e.target.value)}
+                placeholder="Neprivaloma"
                 className="w-full font-mono bg-white border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500 text-right font-medium"
               />
             </div>
@@ -717,21 +912,33 @@ export const ItemModal: React.FC<ItemModalProps> = ({
               <label className="block text-slate-700 font-medium mb-1">Būsena</label>
               <select
                 value={formData.status}
-                onChange={(e) => setFormData({ ...formData, status: e.target.value as any })}
-                className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500"
+                disabled={isStatusLockedByWorkflow}
+                onChange={(e) => setFormData({ ...formData, status: e.target.value as ItemStatus })}
+                className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500 disabled:bg-slate-100 disabled:text-slate-600"
               >
                 <option value="active">Veikiantis / Naudojamas</option>
                 <option value="in_repair">Remontuojamas</option>
-                <option value="to_writeoff">Teikiamas nurašyti</option>
-                <option value="written_off">Nurašytas</option>
+                {editingItem?.status === 'to_writeoff' && (
+                  <option value="to_writeoff">Teikiamas nurašyti (komisijos procedūra)</option>
+                )}
+                {editingItem?.status === 'written_off' && (
+                  <option value="written_off">Nurašytas (archyve)</option>
+                )}
               </select>
+              {isStatusLockedByWorkflow && (
+                <p className="text-[10px] text-amber-700 mt-1">
+                  {editingItem?.status === 'written_off'
+                    ? 'Nurašytas turtas atkuriamas tik per „Atkurti iš archyvo“ veiksmą.'
+                    : 'Ši būsena keičiama tik patvirtinus arba atmetus nurašymą.'}
+                </p>
+              )}
             </div>
 
             <div>
               <label className="block text-slate-700 font-medium mb-1">Būklė</label>
               <select
                 value={formData.condition}
-                onChange={(e) => setFormData({ ...formData, condition: e.target.value as any })}
+                onChange={(e) => setFormData({ ...formData, condition: e.target.value as ItemCondition })}
                 className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-blue-500"
               >
                 <option value="new">Nauja</option>

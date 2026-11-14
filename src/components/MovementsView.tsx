@@ -10,7 +10,7 @@ import {
   Building,
   UserCheck
 } from 'lucide-react';
-import { MovementRecord, Department, Room, User } from '../types/inventory';
+import { MovementRecord, Department, Room, User, formatRoomName } from '../types/inventory';
 
 interface MovementsViewProps {
   movements: MovementRecord[];
@@ -116,6 +116,11 @@ export const MovementsView: React.FC<MovementsViewProps> = ({
                   const fromUser = users.find(u => u.id === mov.fromUserId);
                   const toUser = users.find(u => u.id === mov.toUserId);
 
+                  const fromRoomLabel = mov.fromRoomName || (fromRoom ? formatRoomName(fromRoom, true) : 'Patalpa nenurodyta');
+                  const toRoomLabel = mov.toRoomName || (toRoom ? formatRoomName(toRoom, true) : 'Patalpa nenurodyta');
+                  const fromUserLabel = mov.fromUserName || fromUser?.fullName || 'Nenurodyta';
+                  const toUserLabel = mov.toUserName || toUser?.fullName || 'Nenurodyta';
+
                   return (
                     <tr key={mov.id} className="hover:bg-slate-50 transition-colors">
                       <td className="py-2.5 px-4 font-mono font-semibold text-blue-600 whitespace-nowrap">
@@ -129,12 +134,12 @@ export const MovementsView: React.FC<MovementsViewProps> = ({
                         <div className="text-[11px] font-mono text-slate-500">{mov.inventoryNumber}</div>
                       </td>
                       <td className="py-2.5 px-4">
-                        <div className="text-slate-800">{fromRoom?.number} kab.</div>
-                        <div className="text-[11px] text-slate-500 truncate">{fromUser?.fullName}</div>
+                        <div className="text-slate-800">{fromRoomLabel}</div>
+                        <div className="text-[11px] text-slate-500 truncate">{fromUserLabel}</div>
                       </td>
                       <td className="py-2.5 px-4">
-                        <div className="text-slate-800 font-medium text-blue-700">{toRoom?.number} kab.</div>
-                        <div className="text-[11px] text-slate-600 truncate">{toUser?.fullName}</div>
+                        <div className="text-slate-800 font-medium text-blue-700">{toRoomLabel}</div>
+                        <div className="text-[11px] text-slate-600 truncate">{toUserLabel}</div>
                       </td>
                       <td className="py-2.5 px-4 max-w-xs text-slate-600 truncate">
                         {mov.reason}
@@ -213,21 +218,21 @@ export const MovementsView: React.FC<MovementsViewProps> = ({
                   <div>
                     <span className="text-slate-500 block text-[11px]">Perdavėjas (buvusi vieta):</span>
                     <strong className="text-slate-900">
-                      {users.find(u => u.id === selectedAct.fromUserId)?.fullName || 'Nenurodyta'}
+                      {selectedAct.fromUserName || users.find(u => u.id === selectedAct.fromUserId)?.fullName || 'Nenurodyta'}
                     </strong>
                     <div className="text-slate-600 text-[11px]">
-                      {rooms.find(r => r.id === selectedAct.fromRoomId)?.number} kab. (
-                      {departments.find(d => d.id === selectedAct.fromDepartmentId)?.name})
+                      {selectedAct.fromRoomName || formatRoomName(rooms.find(r => r.id === selectedAct.fromRoomId), true)} (
+                      {selectedAct.fromDepartmentName || departments.find(d => d.id === selectedAct.fromDepartmentId)?.name || 'Nenurodyta'})
                     </div>
                   </div>
                   <div>
                     <span className="text-slate-500 block text-[11px]">Priėmėjas (nauja vieta):</span>
                     <strong className="text-slate-900">
-                      {users.find(u => u.id === selectedAct.toUserId)?.fullName || 'Nenurodyta'}
+                      {selectedAct.toUserName || users.find(u => u.id === selectedAct.toUserId)?.fullName || 'Nenurodyta'}
                     </strong>
                     <div className="text-slate-600 text-[11px]">
-                      {rooms.find(r => r.id === selectedAct.toRoomId)?.number} kab. (
-                      {departments.find(d => d.id === selectedAct.toDepartmentId)?.name})
+                      {selectedAct.toRoomName || formatRoomName(rooms.find(r => r.id === selectedAct.toRoomId), true)} (
+                      {selectedAct.toDepartmentName || departments.find(d => d.id === selectedAct.toDepartmentId)?.name || 'Nenurodyta'})
                     </div>
                   </div>
                 </div>
@@ -270,7 +275,7 @@ export const MovementsView: React.FC<MovementsViewProps> = ({
                 <div className="border-b border-slate-400 h-8"></div>
                 <div className="flex justify-between text-[11px] text-slate-500">
                   <span>(Parašas)</span>
-                  <span>{users.find(u => u.id === selectedAct.fromUserId)?.fullName}</span>
+                  <span>{selectedAct.fromUserName || users.find(u => u.id === selectedAct.fromUserId)?.fullName || 'Nenurodyta'}</span>
                 </div>
               </div>
 
@@ -279,7 +284,7 @@ export const MovementsView: React.FC<MovementsViewProps> = ({
                 <div className="border-b border-slate-400 h-8"></div>
                 <div className="flex justify-between text-[11px] text-slate-500">
                   <span>(Parašas)</span>
-                  <span>{users.find(u => u.id === selectedAct.toUserId)?.fullName}</span>
+                  <span>{selectedAct.toUserName || users.find(u => u.id === selectedAct.toUserId)?.fullName || 'Nenurodyta'}</span>
                 </div>
               </div>
             </div>

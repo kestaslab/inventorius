@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { InventoryItem, DefectReport, formatRoomName, Room, Department } from '../types/inventory';
 import { compressPhoto } from '../utils/imageCompressor';
+import { StorageService } from '../utils/storage';
 
 interface ReportFaultModalProps {
   isOpen: boolean;
@@ -49,10 +50,16 @@ export const ReportFaultModal: React.FC<ReportFaultModalProps> = ({
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    setError('');
     try {
       setIsCompressing(true);
       const compressed = await compressPhoto(file, 800, 0.75);
-      setPhotoUrl(compressed);
+      const uploaded = await StorageService.uploadPhoto(compressed);
+      if (!uploaded.ok) {
+        setError(uploaded.error);
+        return;
+      }
+      setPhotoUrl(uploaded.url);
     } catch (err) {
       setError('Nepavyko apdoroti nuotraukos. Bandykite dar kartą.');
       console.error(err);

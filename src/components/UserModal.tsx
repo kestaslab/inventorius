@@ -33,14 +33,18 @@ export const UserModal: React.FC<UserModalProps> = ({
   const [isActive, setIsActive] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const selectableDepartments = departments.filter((d) => !d.isArchived || d.id === departmentId);
+  const selectableRooms = rooms.filter((r) => !r.isArchived || assignedRoomIds.includes(r.id));
+
   useEffect(() => {
+    const firstActiveDept = departments.find((d) => !d.isArchived)?.id || departments[0]?.id || '';
     if (editingUser) {
       setFullName(editingUser.fullName);
       setEmail(editingUser.email);
       setAllowedGmail(editingUser.allowedGmail || '');
       setRole(editingUser.role);
       setRoleTitle(editingUser.roleTitle);
-      setDepartmentId(editingUser.departmentId || (departments[0]?.id || ''));
+      setDepartmentId(editingUser.departmentId || firstActiveDept);
       const initialRooms = Array.isArray(editingUser.assignedRoomIds) && editingUser.assignedRoomIds.length > 0
         ? editingUser.assignedRoomIds
         : (editingUser.assignedRoomId ? [editingUser.assignedRoomId] : []);
@@ -54,7 +58,7 @@ export const UserModal: React.FC<UserModalProps> = ({
       setAllowedGmail('');
       setRole('teacher');
       setRoleTitle('');
-      setDepartmentId(departments[0]?.id || '');
+      setDepartmentId(firstActiveDept);
       setAssignedRoomIds([]);
       setPhone('');
       setPinCode(Math.floor(1000 + Math.random() * 9000).toString()); // auto random 4-digit PIN
@@ -97,6 +101,7 @@ export const UserModal: React.FC<UserModalProps> = ({
       phone: phone.trim() || undefined,
       pinCode: pinCode.trim() || undefined,
       isActive,
+      isArchived: editingUser?.isArchived,
       lastLoginAt: editingUser?.lastLoginAt,
     };
 
@@ -246,9 +251,9 @@ export const UserModal: React.FC<UserModalProps> = ({
                   className="w-full pl-8 pr-3 py-2 border border-slate-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white cursor-pointer"
                 >
                   <option value="">Nenurodyta</option>
-                  {departments.map((d) => (
+                  {selectableDepartments.map((d) => (
                     <option key={d.id} value={d.id}>
-                      {d.name} ({d.code})
+                      {d.name} ({d.code}){d.isArchived ? ' [Archyvuotas]' : ''}
                     </option>
                   ))}
                 </select>
@@ -301,10 +306,10 @@ export const UserModal: React.FC<UserModalProps> = ({
 
               {/* Room list with checkboxes */}
               <div className="max-h-40 overflow-y-auto border border-slate-300 rounded-lg p-2 bg-slate-50 space-y-1">
-                {rooms.length === 0 ? (
+                {selectableRooms.length === 0 ? (
                   <div className="text-xs text-slate-400 p-2 text-center">Nėra sukurtų kabinetų</div>
                 ) : (
-                  rooms.map(r => {
+                  selectableRooms.map(r => {
                     const isSelected = assignedRoomIds.includes(r.id);
                     const rDept = departments.find(d => d.id === r.departmentId);
                     return (
@@ -325,7 +330,9 @@ export const UserModal: React.FC<UserModalProps> = ({
                             }}
                             className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
                           />
-                          <span className="truncate">{formatRoomName(r)}</span>
+                          <span className="truncate">
+                            {formatRoomName(r)}{r.isArchived ? ' [Archyvuotas]' : ''}
+                          </span>
                         </div>
                         {rDept && (
                           <span className="text-[10px] text-slate-400 font-normal ml-2 shrink-0">

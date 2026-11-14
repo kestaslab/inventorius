@@ -21,6 +21,7 @@ import { LoginPortalView } from './components/LoginPortalView';
 import { AccessDeniedView } from './components/AccessDeniedView';
 import { ReportFaultModal } from './components/ReportFaultModal';
 
+import { AlertTriangle, CloudOff, RefreshCw, Eye, X } from 'lucide-react';
 import { 
   Department, 
   Room, 
@@ -34,7 +35,7 @@ import {
   ItemCondition,
   getUserAssignedRoomIds
 } from './types/inventory';
-import { StorageService } from './utils/storage';
+import { StorageService, SyncState, DbMutation } from './utils/storage';
 
 export default function App() {
   // Application Data States
@@ -47,6 +48,15 @@ export default function App() {
   const [auditSessions, setAuditSessions] = useState<AuditSession[]>(() => StorageService.getAuditSessions());
   const [activeUserId, setActiveUserId] = useState<string | null>(() => StorageService.getActiveUserId());
   const [authSettings, setAuthSettings] = useState<AuthSettings>(() => StorageService.getAuthSettings());
+  const [syncState, setSyncState] = useState<SyncState>(() => StorageService.getSyncState());
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [pendingConfirmAction, setPendingConfirmAction] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    danger?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
 
   // Cloudflare Access Gatekeeper State (Access Denied for students / unlisted users)
   const [deniedAccessEmail, setDeniedAccessEmail] = useState<string | null>(null);
@@ -77,7 +87,7 @@ export default function App() {
 
   const [labelsPreselectedIds, setLabelsPreselectedIds] = useState<string[]>([]);
 
-  // Reload everything from storage (e.g. after JSON backup restore or reset)
+  // Reload everything from authoritative snapshot/cache
   const refreshFromStorage = useCallback(() => {
     setDepartments(StorageService.getDepartments());
     setRooms(StorageService.getRooms());
@@ -90,14 +100,42 @@ export default function App() {
     setAuthSettings(StorageService.getAuthSettings());
   }, []);
 
-  // Initial sync from central Proxmox server disk
+  // Subscribe to server sync status and authoritative/merged DB updates + read-only initial load
   useEffect(() => {
+    const unsubSync = StorageService.subscribeSyncState(setSyncState);
+    const unsubDb = StorageService.subscribeDatabaseUpdated((db) => {
+      setDepartments(db.departments);
+      setRooms(db.rooms);
+      setUsers(db.users);
+      setItems(db.items);
+      setMovements(db.movements);
+      setWriteOffActs(db.writeOffActs);
+      setAuditSessions(db.auditSessions);
+      if (db.authSettings) {
+        setAuthSettings(db.authSettings);
+      }
+    });
+
     StorageService.loadFromServer().then((hasServerData) => {
       if (hasServerData) {
         refreshFromStorage();
       }
     });
+
+    return () => {
+      unsubSync();
+      unsubDb();
+    };
   }, [refreshFromStorage]);
+
+  const runMutation = useCallback(async (op: DbMutation) => {
+    setActionError(null);
+    const res = await StorageService.executeMutation(op);
+    if (!res.ok) {
+      setActionError(res.error || 'Nepavyko išsaugoti pakeitimo serveryje.');
+    }
+    return res;
+  }, []);
 
   const currentUser = users.find(u => u.id === activeUserId) || null;
   const activeAuditSession = auditSessions[0];
@@ -140,82 +178,34 @@ export default function App() {
 
   // User Management Handlers
   const handleSaveUser = (userToSave: User) => {
-    let updatedUsers: User[];
-    const exists = users.some(u => u.id === userToSave.id);
-    if (exists) {
-      updatedUsers = users.map(u => (u.id === userToSave.id ? userToSave : u));
-    } else {
-      updatedUsers = [...users, userToSave];
-    }
-    setUsers(updatedUsers);
-    StorageService.saveUsers(updatedUsers);
-
-    // If admin PIN was changed, also keep authSettings.adminPin strictly synchronized
-    if (userToSave.role === 'admin' && userToSave.pinCode) {
-      const updatedAuth = { ...authSettings, adminPin: userToSave.pinCode };
-      setAuthSettings(updatedAuth);
-      StorageService.saveAuthSettings(updatedAuth);
-    }
+    void runMutation({ type: 'SAVE_USER', user: userToSave });
   };
 
   const handleDeleteUser = (userId: string) => {
-    const updated = users.filter(u => u.id !== userId);
-    setUsers(updated);
-    StorageService.saveUsers(updated);
+    void runMutation({ type: 'DELETE_USER', userId });
+  };
+
+  const handleTransferAndDeleteUser = (userId: string, targetUserId: string) => {
+    void runMutation({ type: 'TRANSFER_AND_DELETE_USER', userId, targetUserId });
+  };
+
+  const handleArchiveUser = (userId: string, isArchived: boolean) => {
+    void runMutation({ type: 'ARCHIVE_USER', userId, isArchived });
   };
 
   const handleUpdateAuthSettings = (newSettings: AuthSettings) => {
-    setAuthSettings(newSettings);
-    StorageService.saveAuthSettings(newSettings);
-
-    // Also sync admin user's pinCode
-    if (newSettings.adminPin) {
-      const updatedUsers = users.map(u => 
-        u.role === 'admin' ? { ...u, pinCode: newSettings.adminPin } : u
-      );
-      setUsers(updatedUsers);
-      StorageService.saveUsers(updatedUsers);
-    }
+    void runMutation({ type: 'UPDATE_AUTH_SETTINGS', authSettings: newSettings });
   };
 
   const handleLoginSuccess = (user: User) => {
     setActiveUserId(user.id);
     StorageService.setActiveUserId(user.id);
-    const updated = users.map(u => 
-      u.id === user.id ? { ...u, lastLoginAt: new Date().toISOString() } : u
-    );
-    setUsers(updated);
-    StorageService.saveUsers(updated);
-  };
-
-  // Auto-sync admin PIN between user profile and authSettings on mount
-  useEffect(() => {
-    const adminUser = users.find(u => u.role === 'admin');
-    if (adminUser) {
-      const activePin = adminUser.pinCode || authSettings.adminPin;
-      if (activePin) {
-        let changed = false;
-        let newUsers = users;
-        let newAuth = authSettings;
-
-        if (adminUser.pinCode !== activePin) {
-          newUsers = users.map(u => u.id === adminUser.id ? { ...u, pinCode: activePin } : u);
-          changed = true;
-        }
-        if (authSettings.adminPin !== activePin) {
-          newAuth = { ...authSettings, adminPin: activePin };
-          changed = true;
-        }
-
-        if (changed) {
-          setUsers(newUsers);
-          StorageService.saveUsers(newUsers);
-          setAuthSettings(newAuth);
-          StorageService.saveAuthSettings(newAuth);
-        }
-      }
+    const snapSync = StorageService.getSyncState();
+    if (snapSync.serverHasDb || snapSync.localPreviewMode) {
+      const updatedUser = { ...user, lastLoginAt: new Date().toISOString() };
+      void runMutation({ type: 'SAVE_USER', user: updatedUser });
     }
-  }, []);
+  };
 
   // Cloudflare Access Email Detection & Whitelist Verification
   useEffect(() => {
@@ -244,19 +234,7 @@ export default function App() {
 
   // Batch Import Users (CSV)
   const handleBatchImportUsers = (newUsersList: User[]) => {
-    const updatedUsers = [...users];
-    newUsersList.forEach((newUser) => {
-      const idx = updatedUsers.findIndex(
-        (u) => u.email.toLowerCase() === newUser.email.toLowerCase()
-      );
-      if (idx !== -1) {
-        updatedUsers[idx] = { ...updatedUsers[idx], ...newUser };
-      } else {
-        updatedUsers.push(newUser);
-      }
-    });
-    setUsers(updatedUsers);
-    StorageService.saveUsers(updatedUsers);
+    void runMutation({ type: 'BATCH_IMPORT_USERS', users: newUsersList });
   };
 
   // Simulate Cloudflare Access Login / Test Screen
@@ -280,67 +258,30 @@ export default function App() {
 
   // Add / Edit Item Handler
   const handleSaveItem = (itemToSave: InventoryItem) => {
-    let updated: InventoryItem[];
-    const exists = items.some(i => i.id === itemToSave.id);
-    if (exists) {
-      updated = items.map(i => (i.id === itemToSave.id ? itemToSave : i));
-    } else {
-      updated = [itemToSave, ...items];
-    }
-    setItems(updated);
-    StorageService.saveItems(updated);
+    void runMutation({ type: 'SAVE_ITEM', item: itemToSave });
   };
 
   // Delete Item Handler
   const handleDeleteItem = (itemId: string) => {
-    if (confirm('Ar tikrai norite pašalinti šį įrašą iš registro?')) {
-      const updated = items.filter(i => i.id !== itemId);
-      setItems(updated);
-      StorageService.saveItems(updated);
-    }
+    setPendingConfirmAction({
+      title: 'Pašalinti turto įrašą?',
+      message: 'Ar tikrai norite pašalinti šį įrašą iš inventoriaus registro?',
+      confirmLabel: 'Taip, pašalinti',
+      danger: true,
+      onConfirm: () => {
+        setPendingConfirmAction(null);
+        void runMutation({ type: 'DELETE_ITEM', itemId });
+      },
+    });
   };
 
-  // Transfer Asset Handler
+  // Transfer Asset Handler (atomically updates movements and item location)
   const handleExecuteTransfer = (record: MovementRecord) => {
-    // 1. Add movement to history
-    const updatedMovements = [record, ...movements];
-    setMovements(updatedMovements);
-    StorageService.saveMovements(updatedMovements);
-
-    // 2. Update item location and responsible person
-    const updatedItems = items.map(i => {
-      if (i.id === record.itemId) {
-        return {
-          ...i,
-          departmentId: record.toDepartmentId,
-          roomId: record.toRoomId,
-          responsibleUserId: record.toUserId,
-        };
-      }
-      return i;
-    });
-    setItems(updatedItems);
-    StorageService.saveItems(updatedItems);
+    void runMutation({ type: 'TRANSFER_ITEM', record });
   };
 
-  // Write-off Handler
+  // Write-off Handler (atomically updates item and creates draft act)
   const handleConfirmWriteOff = (item: InventoryItem, reasonCategory: string, notes: string) => {
-    // 1. Update item status to 'to_writeoff'
-    const updatedItems = items.map(i => {
-      if (i.id === item.id) {
-        return {
-          ...i,
-          status: 'to_writeoff' as const,
-          condition: 'poor' as const,
-          notes: notes ? `${i.notes ? i.notes + ' | ' : ''}Defektas: ${notes}` : i.notes,
-        };
-      }
-      return i;
-    });
-    setItems(updatedItems);
-    StorageService.saveItems(updatedItems);
-
-    // 2. Append to draft or create write-off act
     const currentYear = new Date().getFullYear();
     const actNumber = `NUR-${currentYear}-${Math.floor(10 + Math.random() * 90)}`;
     const newAct: WriteOffAct = {
@@ -366,214 +307,143 @@ export default function App() {
       ],
     };
 
-    const updatedActs = [newAct, ...writeOffActs];
-    setWriteOffActs(updatedActs);
-    StorageService.saveWriteOffActs(updatedActs);
+    void runMutation({
+      type: 'CONFIRM_WRITEOFF',
+      itemId: item.id,
+      reasonCategory,
+      notes,
+      act: newAct,
+    });
   };
 
   // Audit Session update
   const handleUpdateAuditSession = (updatedSession: AuditSession) => {
-    const updated = auditSessions.map(s => (s.id === updatedSession.id ? updatedSession : s));
-    setAuditSessions(updated);
-    StorageService.saveAuditSessions(updated);
+    void runMutation({ type: 'UPDATE_AUDIT_SESSION', session: updatedSession });
   };
 
   // Relocate Item during physical audit
   const handleRelocateItem = (itemId: string, newRoomId: string) => {
-    const targetRoom = rooms.find(r => r.id === newRoomId);
-    if (!targetRoom) return;
-
-    const updatedItems = items.map(i => {
-      if (i.id === itemId) {
-        return {
-          ...i,
-          roomId: newRoomId,
-          departmentId: targetRoom.departmentId,
-          responsibleUserId: targetRoom.defaultResponsiblePersonId || i.responsibleUserId,
-          lastAuditDate: new Date().toISOString().slice(0, 10),
-        };
-      }
-      return i;
+    if (!rooms.some(r => r.id === newRoomId)) return;
+    void runMutation({
+      type: 'RELOCATE_AUDIT_ITEM',
+      itemId,
+      newRoomId,
+      auditDate: new Date().toISOString().slice(0, 10),
     });
-    setItems(updatedItems);
-    StorageService.saveItems(updatedItems);
   };
 
   // Defect / Fault Report Handler from teachers or staff
   const handleSaveFaultReport = (itemToSave: InventoryItem, defectReport: DefectReport) => {
-    const updatedItems: InventoryItem[] = items.map(i => {
-      if (i.id === itemToSave.id) {
-        const existingReports = i.defectReports || [];
-        const updatedReports = [...existingReports, defectReport];
-        const defectNote = `[Gedimas ${new Date().toLocaleDateString('lt-LT')}]: ${defectReport.description}`;
-        const newCondition: ItemCondition = i.condition === 'new' ? 'fair' : (i.condition === 'good' ? 'fair' : 'poor');
-        return {
-          ...i,
-          status: 'in_repair',
-          condition: newCondition,
-          notes: i.notes ? `${i.notes} | ${defectNote}` : defectNote,
-          activeDefectNote: defectReport.description,
-          defectReports: updatedReports,
-        };
-      }
-      return i;
+    const defectNote = `[Gedimas ${new Date().toLocaleDateString('lt-LT')}]: ${defectReport.description}`;
+    const newCondition: ItemCondition =
+      itemToSave.condition === 'new' ? 'fair' : itemToSave.condition === 'good' ? 'fair' : 'poor';
+    void runMutation({
+      type: 'SAVE_FAULT_REPORT',
+      itemId: itemToSave.id,
+      defectReport,
+      defectNote,
+      newCondition,
     });
-    setItems(updatedItems);
-    StorageService.saveItems(updatedItems);
   };
 
   // Save / Delete Department
   const handleSaveDepartment = (dept: Department) => {
-    const exists = departments.some(d => d.id === dept.id);
-    const updated = exists ? departments.map(d => (d.id === dept.id ? dept : d)) : [...departments, dept];
-    setDepartments(updated);
-    StorageService.saveDepartments(updated);
+    void runMutation({ type: 'SAVE_DEPARTMENT', department: dept });
   };
 
   const handleDeleteDepartment = (deptId: string) => {
-    const updated = departments.filter(d => d.id !== deptId);
-    setDepartments(updated);
-    StorageService.saveDepartments(updated);
+    void runMutation({ type: 'DELETE_DEPARTMENT', departmentId: deptId });
+  };
+
+  const handleTransferAndDeleteDepartment = (departmentId: string, targetDepartmentId: string) => {
+    void runMutation({ type: 'TRANSFER_AND_DELETE_DEPARTMENT', departmentId, targetDepartmentId });
+  };
+
+  const handleArchiveDepartment = (departmentId: string, isArchived: boolean) => {
+    void runMutation({ type: 'ARCHIVE_DEPARTMENT', departmentId, isArchived });
   };
 
   // Save / Delete Room
   const handleSaveRoom = (room: Room) => {
-    const exists = rooms.some(r => r.id === room.id);
-    const updated = exists ? rooms.map(r => (r.id === room.id ? room : r)) : [...rooms, room];
-    setRooms(updated);
-    StorageService.saveRooms(updated);
+    void runMutation({ type: 'SAVE_ROOM', room });
   };
 
   const handleDeleteRoom = (roomId: string) => {
-    const updated = rooms.filter(r => r.id !== roomId);
-    setRooms(updated);
-    StorageService.saveRooms(updated);
+    void runMutation({ type: 'DELETE_ROOM', roomId });
+  };
+
+  const handleTransferAndDeleteRoom = (roomId: string, targetRoomId: string) => {
+    void runMutation({ type: 'TRANSFER_AND_DELETE_ROOM', roomId, targetRoomId });
+  };
+
+  const handleArchiveRoom = (roomId: string, isArchived: boolean) => {
+    void runMutation({ type: 'ARCHIVE_ROOM', roomId, isArchived });
   };
 
   // Approve single item write-off -> Moves item to 'written_off' archive with chosen year
-  const handleApproveItemWriteOff = (item: InventoryItem, approvalYear: number = new Date().getFullYear(), customActNumber?: string) => {
+  const handleApproveItemWriteOff = (
+    item: InventoryItem,
+    approvalYear: number = new Date().getFullYear(),
+    customActNumber?: string
+  ) => {
     const actNum = customActNumber || item.writeOffActNumber || `NUR-${approvalYear}-${Math.floor(10 + Math.random() * 90)}`;
     const today = new Date().toISOString().slice(0, 10);
-    const updatedItems = items.map(i => {
-      if (i.id === item.id) {
-        return {
-          ...i,
-          status: 'written_off' as const,
-          writtenOffDate: today,
-          writtenOffYear: approvalYear,
-          writeOffActNumber: actNum,
-          writeOffReason: i.writeOffReason || item.notes || 'Komisijos patvirtintas nurašymas',
-        };
-      }
-      return i;
+    void runMutation({
+      type: 'APPROVE_ITEM_WRITEOFF',
+      itemId: item.id,
+      approvalYear,
+      actNumber: actNum,
+      approvedDate: today,
+      fallbackNotes: item.notes,
     });
-    setItems(updatedItems);
-    StorageService.saveItems(updatedItems);
-
-    // Update draft act if exists
-    const updatedActs = writeOffActs.map(act => {
-      if (act.items.some(actItem => actItem.itemId === item.id)) {
-        return {
-          ...act,
-          status: 'approved' as const,
-          actYear: approvalYear,
-          approvedDate: today,
-        };
-      }
-      return act;
-    });
-    setWriteOffActs(updatedActs);
-    StorageService.saveWriteOffActs(updatedActs);
   };
 
   // Reject / Revert item pending write-off back to active
   const handleRejectWriteOff = (itemId: string) => {
-    const updatedItems = items.map(i => {
-      if (i.id === itemId) {
-        return {
-          ...i,
-          status: 'active' as const,
-        };
-      }
-      return i;
-    });
-    setItems(updatedItems);
-    StorageService.saveItems(updatedItems);
+    void runMutation({ type: 'REJECT_WRITEOFF', itemId });
   };
 
   // Restore archived written-off item back to active inventory
   const handleRestoreFromArchive = (itemId: string) => {
-    if (confirm('Ar tikrai norite atkurti šį nurašytą turtą atgal į aktyvios apskaitos registrą?')) {
-      const updatedItems = items.map(i => {
-        if (i.id === itemId) {
-          return {
-            ...i,
-            status: 'active' as const,
-            condition: 'good' as const,
-            notes: i.notes ? `${i.notes} (Atkurta iš ${i.writtenOffYear || ''} m. archyvo)` : 'Atkurta iš archyvo',
-          };
-        }
-        return i;
-      });
-      setItems(updatedItems);
-      StorageService.saveItems(updatedItems);
-    }
+    setPendingConfirmAction({
+      title: 'Atkurti turtą iš archyvo?',
+      message: 'Ar tikrai norite atkurti šį nurašytą turtą atgal į aktyvios apskaitos registrą?',
+      confirmLabel: 'Atkurti į apskaitą',
+      onConfirm: () => {
+        setPendingConfirmAction(null);
+        void runMutation({ type: 'RESTORE_FROM_ARCHIVE', itemId, noteAppend: '' });
+      },
+    });
   };
 
   // Permanently delete item
   const handlePermanentDelete = (itemId: string) => {
-    if (confirm('DĖMESIO: Šis veiksmas visiškai pašalins materialiąją vertybę iš sistemos be galimybės atkurti. Ar tęsti?')) {
-      const updated = items.filter(i => i.id !== itemId);
-      setItems(updated);
-      StorageService.saveItems(updated);
-    }
+    setPendingConfirmAction({
+      title: 'Galutinai ištrinti materialiąją vertybę?',
+      message: 'DĖMESIO: Šis veiksmas visiškai pašalins materialiąją vertybę iš sistemos be galimybės atkurti. Ar tęsti?',
+      confirmLabel: 'Visiškai ištrinti',
+      danger: true,
+      onConfirm: () => {
+        setPendingConfirmAction(null);
+        void runMutation({ type: 'DELETE_ITEM', itemId });
+      },
+    });
   };
 
   // Approve entire write-off act from ReportsView
   const handleApproveWriteOffAct = (actId: string, approvalYear: number = new Date().getFullYear()) => {
-    const targetAct = writeOffActs.find(a => a.id === actId);
-    if (!targetAct) return;
-
     const today = new Date().toISOString().slice(0, 10);
-    const updatedActs = writeOffActs.map(a => {
-      if (a.id === actId) {
-        return {
-          ...a,
-          status: 'approved' as const,
-          actYear: approvalYear,
-          approvedDate: today,
-        };
-      }
-      return a;
+    void runMutation({
+      type: 'APPROVE_WRITEOFF_ACT',
+      actId,
+      approvalYear,
+      approvedDate: today,
     });
-    setWriteOffActs(updatedActs);
-    StorageService.saveWriteOffActs(updatedActs);
-
-    const actItemIds = new Set(targetAct.items.map(it => it.itemId));
-    const updatedItems = items.map(i => {
-      if (actItemIds.has(i.id)) {
-        return {
-          ...i,
-          status: 'written_off' as const,
-          writtenOffDate: today,
-          writtenOffYear: approvalYear,
-          writeOffActNumber: targetAct.actNumber,
-          writeOffReason: targetAct.reasonCategory,
-          writeOffActId: targetAct.id,
-        };
-      }
-      return i;
-    });
-    setItems(updatedItems);
-    StorageService.saveItems(updatedItems);
   };
 
   // Save Write-off Act
   const handleSaveWriteOffAct = (act: WriteOffAct) => {
-    const exists = writeOffActs.some(a => a.id === act.id);
-    const updated = exists ? writeOffActs.map(a => (a.id === act.id ? act : a)) : [act, ...writeOffActs];
-    setWriteOffActs(updated);
-    StorageService.saveWriteOffActs(updated);
+    void runMutation({ type: 'SAVE_WRITEOFF_ACT', act });
   };
 
   // Quick Print Specific Labels from Inventory List
@@ -664,11 +534,120 @@ export default function App() {
           onExportCSV={handleExportCSV}
           onOpenLoginModal={() => setIsLoginModalOpen(true)}
           onLogout={handleLogout}
+          syncState={syncState}
+          onRetrySync={() => {
+            setActionError(null);
+            void StorageService.retryPendingMutations();
+          }}
+          onReloadFromServer={() => {
+            setActionError(null);
+            void StorageService.resolveConflictByReloadingServer().then(refreshFromStorage);
+          }}
+          onExitLocalPreview={() => {
+            setActionError(null);
+            void StorageService.exitLocalDemoPreview().then(refreshFromStorage);
+          }}
         />
 
         {/* View Content Viewport */}
         <main className="flex-1 overflow-y-auto p-6 md:p-8 bg-slate-100/90">
           <div className="max-w-7xl mx-auto">
+            {/* Sync / Conflict / Error / Local Preview Alert Banners */}
+            {(actionError || syncState.status === 'error' || syncState.status === 'conflict' || syncState.localPreviewMode || syncState.storageWarning || syncState.status === 'uninitialized') && (
+              <div className="mb-4 space-y-2 no-print">
+                {syncState.localPreviewMode && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 rounded-lg bg-amber-50 border border-amber-300 text-xs text-amber-950">
+                    <div className="flex items-center gap-2">
+                      <Eye className="w-4 h-4 text-amber-700 shrink-0" />
+                      <span>
+                        <strong>Vietinė demonstracinė peržiūra:</strong> rodomi tik demonstraciniai duomenys šiame naršyklės lange. Centrinė serverio bazė nėra pakeista.
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void StorageService.exitLocalDemoPreview().then(refreshFromStorage)}
+                      className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white font-bold cursor-pointer"
+                    >
+                      Grįžti prie serverio duomenų
+                    </button>
+                  </div>
+                )}
+
+                {syncState.status === 'conflict' && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 rounded-lg bg-amber-50 border border-amber-300 text-xs text-amber-950">
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                      <span>
+                        <strong>Konfliktas:</strong> {syncState.errorMessage || 'Šį įrašą ką tik pakeitė kitas naudotojas.'}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActionError(null);
+                        void StorageService.resolveConflictByReloadingServer().then(refreshFromStorage);
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white font-bold cursor-pointer"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Atnaujinti iš serverio</span>
+                    </button>
+                  </div>
+                )}
+
+                {(syncState.status === 'error' || actionError) && syncState.status !== 'conflict' && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 rounded-lg bg-rose-50 border border-rose-300 text-xs text-rose-900">
+                    <div className="flex items-center gap-2">
+                      <CloudOff className="w-4 h-4 text-rose-600 shrink-0" />
+                      <span>
+                        <strong>Nepavyko išsaugoti:</strong> {actionError || syncState.errorMessage}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {syncState.pendingCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActionError(null);
+                            void StorageService.retryPendingMutations();
+                          }}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white font-bold cursor-pointer"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          <span>Bandyti dar kartą ({syncState.pendingCount})</span>
+                        </button>
+                      )}
+                      {actionError && syncState.status !== 'error' && (
+                        <button
+                          type="button"
+                          onClick={() => setActionError(null)}
+                          className="p-1 text-rose-600 hover:text-rose-800 cursor-pointer"
+                          title="Uždaryti pranešimą"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {syncState.status === 'uninitialized' && !syncState.localPreviewMode && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-900">
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 text-blue-600 shrink-0" />
+                      <span>{syncState.errorMessage}</span>
+                    </div>
+                  </div>
+                )}
+
+                {syncState.storageWarning && (
+                  <div className="flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-50 border border-amber-200 text-[11px] text-amber-900">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>{syncState.storageWarning}</span>
+                  </div>
+                )}
+              </div>
+            )}
             {currentTab === 'my_inventory' && currentUser && (
               <MyInventoryView
                 currentUser={currentUser}
@@ -744,8 +723,12 @@ export default function App() {
                 currentUser={currentUser}
                 onSaveDepartment={handleSaveDepartment}
                 onDeleteDepartment={handleDeleteDepartment}
+                onTransferAndDeleteDepartment={handleTransferAndDeleteDepartment}
+                onArchiveDepartment={handleArchiveDepartment}
                 onSaveRoom={handleSaveRoom}
                 onDeleteRoom={handleDeleteRoom}
+                onTransferAndDeleteRoom={handleTransferAndDeleteRoom}
+                onArchiveRoom={handleArchiveRoom}
                 onViewItemDetail={(item) => {
                   setDetailItem(item);
                   setIsDetailModalOpen(true);
@@ -808,10 +791,14 @@ export default function App() {
                 users={users}
                 departments={departments}
                 rooms={rooms}
+                items={items}
+                auditSessions={auditSessions}
                 currentUser={currentUser}
                 authSettings={authSettings}
                 onSaveUser={handleSaveUser}
                 onDeleteUser={handleDeleteUser}
+                onTransferAndDeleteUser={handleTransferAndDeleteUser}
+                onArchiveUser={handleArchiveUser}
                 onUpdateAuthSettings={handleUpdateAuthSettings}
                 onSwitchUser={handleChangeUser}
                 onOpenCreateUser={() => {
@@ -829,7 +816,12 @@ export default function App() {
             {currentTab === 'selfhost' && (
               <SelfHostView 
                 currentUser={currentUser}
-                onRefreshData={refreshFromStorage} 
+                onRefreshData={refreshFromStorage}
+                items={items}
+                rooms={rooms}
+                movements={movements}
+                writeOffActs={writeOffActs}
+                syncState={syncState}
               />
             )}
           </div>
@@ -852,7 +844,7 @@ export default function App() {
 
       {isDetailModalOpen && detailItem && (
         <ItemDetailModal
-          item={detailItem}
+          item={items.find(i => i.id === detailItem.id) || detailItem}
           onClose={() => setIsDetailModalOpen(false)}
           departments={departments}
           rooms={rooms}
@@ -941,6 +933,44 @@ export default function App() {
           currentUser={currentUser}
           onLoginSuccess={handleLoginSuccess}
         />
+      )}
+
+      {pendingConfirmAction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="bg-white border border-slate-200 rounded-xl max-w-md w-full p-5 shadow-2xl space-y-4">
+            <div className="flex items-start gap-3">
+              <div className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${
+                pendingConfirmAction.danger ? 'bg-rose-50 text-rose-600' : 'bg-blue-50 text-blue-600'
+              }`}>
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="font-bold text-slate-900 text-sm">{pendingConfirmAction.title}</h4>
+                <p className="text-xs text-slate-600 mt-1 leading-relaxed">{pendingConfirmAction.message}</p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setPendingConfirmAction(null)}
+                className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+              >
+                Atšaukti
+              </button>
+              <button
+                type="button"
+                onClick={pendingConfirmAction.onConfirm}
+                className={`px-3.5 py-1.5 text-xs font-bold text-white rounded-lg transition-colors cursor-pointer ${
+                  pendingConfirmAction.danger
+                    ? 'bg-rose-600 hover:bg-rose-700'
+                    : 'bg-blue-600 hover:bg-blue-700'
+                }`}
+              >
+                {pendingConfirmAction.confirmLabel}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
