@@ -37,10 +37,12 @@ import {
   User, 
   ItemCategory, 
   ItemStatus,
+  ItemCondition,
   AssetClass,
   FundingSource,
   ComputerType,
   ComputerSpecs,
+  WriteOffAct,
   COMPUTER_TYPE_LABELS,
   COMPUTER_TYPE_SHORT_LABELS,
   ASSET_CLASS_SHORT_LABELS,
@@ -49,6 +51,11 @@ import {
   formatRoomName
 } from '../types/inventory';
 import { StorageService } from '../utils/storage';
+import {
+  findActiveDraftActForItem,
+  analyzeWriteOffIntegrity,
+  getWriteOffActYear,
+} from '../utils/writeOffUtils';
 
 export function calculateAgeInYears(acquisitionDate: string): number {
   if (!acquisitionDate) return 0;
@@ -83,6 +90,7 @@ interface InventoryListViewProps {
   departments: Department[];
   rooms: Room[];
   users: User[];
+  writeOffActs?: WriteOffAct[];
   currentUser: User;
   onEditItem: (item: InventoryItem) => void;
   onDeleteItem: (itemId: string) => void;
@@ -91,9 +99,15 @@ interface InventoryListViewProps {
   onViewItemDetail: (item: InventoryItem) => void;
   onPrintSpecificLabels: (itemIds: string[]) => void;
   onApproveWriteOff?: (item: InventoryItem, approvalYear: number, customActNumber?: string) => void;
-  onRejectWriteOff?: (itemId: string) => void;
-  onRestoreFromArchive?: (itemId: string) => void;
+  onApproveWriteOffAct?: (actId: string, approvalYear: number, customActNumber?: string) => void;
+  onRejectWriteOff?: (itemId: string, reason?: string) => void;
+  onRestoreFromArchive?: (itemId: string, condition: ItemCondition, reason: string) => void;
   onPermanentDelete?: (itemId: string) => void;
+  onReconcileWriteOffIssue?: (
+    action: 'return_to_active' | 'remove_stale_draft_item' | 'link_by_existing_act_number',
+    itemId?: string,
+    actId?: string
+  ) => void;
 }
 
 export const InventoryListView: React.FC<InventoryListViewProps> = ({
@@ -101,6 +115,7 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
   departments,
   rooms,
   users,
+  writeOffActs = [],
   currentUser,
   onEditItem,
   onDeleteItem,
@@ -109,18 +124,29 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
   onViewItemDetail,
   onPrintSpecificLabels,
   onApproveWriteOff,
+  onApproveWriteOffAct,
   onRejectWriteOff,
   onRestoreFromArchive,
   onPermanentDelete,
+  onReconcileWriteOffIssue,
 }) => {
   // Navigation Lifecycle Tabs: Aktyvus turtas | Teikiami nurašyti | Nurašyto turto archyvas
   const [inventoryViewTab, setInventoryViewTab] = useState<'active' | 'to_writeoff' | 'archive'>('active');
   const [selectedArchiveYear, setSelectedArchiveYear] = useState<'all' | number>('all');
 
-  // Modal for approving write-off
+  // Modal for approving write-off (whole linked act)
   const [approvalModalItem, setApprovalModalItem] = useState<InventoryItem | null>(null);
   const [approvalYear, setApprovalYear] = useState<number>(new Date().getFullYear());
   const [approvalActNumber, setApprovalActNumber] = useState<string>('');
+
+  // Modal for rejecting pending write-off
+  const [rejectModalItem, setRejectModalItem] = useState<InventoryItem | null>(null);
+  const [rejectReason, setRejectReason] = useState<string>('');
+
+  // Modal for restoring archived item (explicit condition + reason, never auto 'good')
+  const [restoreModalItem, setRestoreModalItem] = useState<InventoryItem | null>(null);
+  const [restoreCondition, setRestoreCondition] = useState<'' | ItemCondition>('');
+  const [restoreReason, setRestoreReason] = useState<string>('');
 
   // Filter states
   const [searchTerm, setSearchTerm] = useState('');
@@ -365,17 +391,68 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
     setSelectedItemIds(next);
   };
 
+  const approvalLinkedAct = useMemo(() => {
+    if (!approvalModalItem) return undefined;
+    return findActiveDraftActForItem(writeOffActs, approvalModalItem);
+  }, [approvalModalItem, writeOffActs]);
+
+  const approvalYearOptions = useMemo(() => {
+    const maxYear = new Date().getFullYear() + 1;
+    const minYear = 2020;
+    const arr: number[] = [];
+    for (let y = maxYear; y >= minYear; y--) arr.push(y);
+    return arr;
+  }, []);
+
+  const writeOffIntegrityIssues = useMemo(
+    () => analyzeWriteOffIntegrity(items, writeOffActs),
+    [items, writeOffActs]
+  );
+
   const openApproveModal = (item: InventoryItem) => {
+    const linked = findActiveDraftActForItem(writeOffActs, item);
     setApprovalModalItem(item);
-    setApprovalYear(item.writtenOffYear || new Date().getFullYear());
-    setApprovalActNumber(item.writeOffActNumber || `NUR-${new Date().getFullYear()}-01`);
+    setApprovalYear(linked ? getWriteOffActYear(linked) : item.writtenOffYear || new Date().getFullYear());
+    setApprovalActNumber(linked?.actNumber || item.writeOffActNumber || '');
   };
 
   const handleConfirmApproval = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!approvalModalItem || !onApproveWriteOff) return;
-    onApproveWriteOff(approvalModalItem, Number(approvalYear), approvalActNumber.trim());
-    setApprovalModalItem(null);
+    if (!approvalModalItem) return;
+    if (approvalLinkedAct && onApproveWriteOffAct) {
+      onApproveWriteOffAct(approvalLinkedAct.id, Number(approvalYear), approvalActNumber.trim());
+      setApprovalModalItem(null);
+      return;
+    }
+    if (!approvalLinkedAct && writeOffActs.length === 0 && onApproveWriteOff) {
+      onApproveWriteOff(approvalModalItem, Number(approvalYear), approvalActNumber.trim());
+      setApprovalModalItem(null);
+    }
+  };
+
+  const openRejectModal = (item: InventoryItem) => {
+    setRejectModalItem(item);
+    setRejectReason('');
+  };
+
+  const handleConfirmReject = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!rejectModalItem || !onRejectWriteOff) return;
+    onRejectWriteOff(rejectModalItem.id, rejectReason.trim() || undefined);
+    setRejectModalItem(null);
+  };
+
+  const openRestoreModal = (item: InventoryItem) => {
+    setRestoreModalItem(item);
+    setRestoreCondition('');
+    setRestoreReason('');
+  };
+
+  const handleConfirmRestore = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!restoreModalItem || !onRestoreFromArchive || !restoreCondition || !restoreReason.trim()) return;
+    onRestoreFromArchive(restoreModalItem.id, restoreCondition, restoreReason.trim());
+    setRestoreModalItem(null);
   };
 
   const canManage = currentUser.role === 'admin' || currentUser.role === 'manager';
@@ -504,7 +581,7 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
           <div className="space-y-0.5">
             <p className="font-semibold">Nurašymui pateiktas turtas (laukia komisijos sprendimo)</p>
             <p className="text-rose-700">
-              Ūkio darbuotojų arba mokytojų teikiamas nebetinkamas naudoti inventorius. Nurašymo komisijai patvirtinus aktą, turtas perkeliamas į archyvą pagal nurodytus metus (pvz. 2026 m., 2025 m., 2020 m.). Galite patvirtinti nurašymą arba atmesti teikimą.
+              Ūkio darbuotojų arba mokytojų teikiamas nebetinkamas naudoti inventorius. Tvirtinamas visas susietas nurašymo aktas kartu. Jei kelių daiktų akte kurį nors daiktą reikia palikti naudojimui, pirmiausia jį atmeskite.
             </p>
           </div>
         </div>
@@ -517,8 +594,62 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
           <div className="space-y-0.5">
             <p className="font-semibold">Nurašyto materialiojo turto archyvas pagal metus</p>
             <p className="text-purple-700">
-              Čia saugoma visa mokyklos nurašyto ir likviduoto turto istorija (pvz., 2020 m. nurašytas turtas, 2025 m., 2026 m.). Esant reikalui nurašytą daiktą galima atkurti į apskaitą arba galutinai ištrinti iš registro.
+              Čia saugoma visa mokyklos nurašyto ir likviduoto turto istorija. Atkuriant daiktą į apskaitą, istorinis aktas neištrinamas – užfiksuojama faktinė daikto būklė ir atkūrimo priežastis.
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Integrity warnings for write-off / archive tabs */}
+      {(inventoryViewTab === 'to_writeoff' || inventoryViewTab === 'archive') && writeOffIntegrityIssues.length > 0 && (
+        <div className="bg-amber-50 border border-amber-300 rounded-lg p-3.5 text-xs text-amber-950 space-y-2">
+          <div className="flex items-center gap-2 font-bold">
+            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+            <span>Aptikti nurašymo duomenų neatitikimai ({writeOffIntegrityIssues.length})</span>
+          </div>
+          <p className="text-[11px] text-amber-800">
+            Istoriniai duomenys nebuvo automatiškai pakeisti ar išgalvoti. Galite saugiai sutvarkyti žinomus ryšių neatitikimus:
+          </p>
+          <div className="space-y-1.5">
+            {writeOffIntegrityIssues.map((issue) => (
+              <div
+                key={issue.id}
+                className="flex flex-wrap items-center justify-between gap-2 bg-white/80 border border-amber-200 rounded px-2.5 py-1.5"
+              >
+                <span className="text-[11px] text-slate-800">{issue.message}</span>
+                {onReconcileWriteOffIssue && (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {issue.canReturnToActive && issue.itemId && (
+                      <button
+                        type="button"
+                        onClick={() => onReconcileWriteOffIssue('return_to_active', issue.itemId)}
+                        className="px-2 py-0.5 rounded bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-semibold cursor-pointer"
+                      >
+                        Grąžinti į aktyvius
+                      </button>
+                    )}
+                    {issue.canRemoveFromDraftAct && issue.actId && issue.itemId && (
+                      <button
+                        type="button"
+                        onClick={() => onReconcileWriteOffIssue('remove_stale_draft_item', issue.itemId, issue.actId)}
+                        className="px-2 py-0.5 rounded bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-semibold cursor-pointer"
+                      >
+                        Pašalinti iš projekto
+                      </button>
+                    )}
+                    {issue.canLinkExistingAct && issue.itemId && issue.matchingActId && (
+                      <button
+                        type="button"
+                        onClick={() => onReconcileWriteOffIssue('link_by_existing_act_number', issue.itemId, issue.matchingActId)}
+                        className="px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold cursor-pointer"
+                      >
+                        Susieti su esamu aktu
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         </div>
       )}
@@ -1091,14 +1222,30 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
                             </div>
                           </td>
 
-                          {/* Reason */}
+                          {/* Reason & linked draft act */}
                           <td className="py-2.5 px-3">
-                            <div className="text-xs font-medium text-rose-800">
-                              {item.writeOffReason || 'Defektas / Neveikia'}
-                            </div>
-                            <div className="text-[11px] text-slate-500 italic mt-0.5 line-clamp-2">
-                              {item.notes || 'Pateikta komisijos vertinimui'}
-                            </div>
+                            {(() => {
+                              const draft = findActiveDraftActForItem(writeOffActs, item);
+                              const actNum = draft?.actNumber || item.writeOffActNumber;
+                              return (
+                                <div className="space-y-0.5">
+                                  {actNum && (
+                                    <div className="inline-flex items-center gap-1 text-[10px] font-mono font-bold px-1.5 py-0.2 rounded bg-rose-100 text-rose-800">
+                                      <span>{actNum}</span>
+                                      {draft && draft.items.length > 1 && (
+                                        <span>({draft.items.length} vnt. kartu)</span>
+                                      )}
+                                    </div>
+                                  )}
+                                  <div className="text-xs font-medium text-rose-800">
+                                    {item.writeOffReason || 'Defektas / Neveikia'}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 italic line-clamp-2">
+                                    {item.notes || 'Pateikta komisijos vertinimui'}
+                                  </div>
+                                </div>
+                              );
+                            })()}
                           </td>
                         </>
                       ) : (
@@ -1197,7 +1344,7 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
                           {inventoryViewTab === 'archive' && canManage && (
                             <>
                               <button
-                                onClick={() => onRestoreFromArchive && onRestoreFromArchive(item.id)}
+                                onClick={() => openRestoreModal(item)}
                                 title="Atkurti į aktyvią apskaitą"
                                 className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded cursor-pointer transition-colors"
                               >
@@ -1219,14 +1366,14 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
                             <>
                               <button
                                 onClick={() => openApproveModal(item)}
-                                title="Patvirtinti nurašymą ir archyvuoti"
+                                title="Patvirtinti susietą nurašymo aktą"
                                 className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded shadow-2xs cursor-pointer transition-colors"
                               >
                                 <CheckCircle className="w-3.5 h-3.5" />
                                 <span>Patvirtinti nurašymą</span>
                               </button>
                               <button
-                                onClick={() => onRejectWriteOff && onRejectWriteOff(item.id)}
+                                onClick={() => openRejectModal(item)}
                                 title="Atmesti teikimą ir grąžinti į aktyvius"
                                 className="px-2 py-1 text-[11px] font-medium text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded cursor-pointer transition-colors"
                               >
@@ -1272,7 +1419,7 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
         </div>
       </div>
 
-      {/* Write-off Approval Modal */}
+      {/* Write-off Approval Modal (Whole Act) */}
       {approvalModalItem && (
         <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-5 space-y-4">
@@ -1280,81 +1427,273 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
               <div className="flex items-center gap-2">
                 <CheckCircle className="w-5 h-5 text-rose-600" />
                 <h3 className="text-sm font-semibold text-slate-900">
-                  Patvirtinti nurašymą ir perkelti į archyvą
+                  {approvalLinkedAct && approvalLinkedAct.items.length > 1
+                    ? `Patvirtinti nurašymo aktą (${approvalLinkedAct.items.length} vnt.)`
+                    : 'Patvirtinti nurašymą ir perkelti į archyvą'}
                 </h3>
               </div>
               <button 
                 type="button" 
                 onClick={() => setApprovalModalItem(null)}
-                className="text-slate-400 hover:text-slate-600 text-sm font-semibold"
+                className="text-slate-400 hover:text-slate-600 text-sm font-semibold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {!approvalLinkedAct && writeOffActs.length > 0 ? (
+              <div className="space-y-3 text-xs">
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded text-rose-900">
+                  Nerastas aktyvus nurašymo akto projektas šiam daiktui. Pagal nustatytą taisyklę nurašymas tvirtinamas tik per susietą aktą. Patikrinkite aukščiau esančius neatitikimų pranešimus arba atmeskite teikimą.
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setApprovalModalItem(null)}
+                    className="px-3 py-1.5 text-xs text-slate-700 bg-slate-100 hover:bg-slate-200 rounded cursor-pointer"
+                  >
+                    Uždaryti
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="bg-slate-50 p-3 rounded border border-slate-200 text-xs space-y-1.5">
+                  {approvalLinkedAct && approvalLinkedAct.items.length > 1 ? (
+                    <>
+                      <div className="font-semibold text-amber-900 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+                        Šis daiktas priklauso kelių daiktų aktui „{approvalLinkedAct.actNumber}“. Patvirtinus aktą, visi {approvalLinkedAct.items.length} daiktai bus nurašyti kartu. Jei kurį nors daiktą reikia palikti, pirmiausia jį atmeskite.
+                      </div>
+                      <ul className="space-y-1 pt-1 max-h-36 overflow-y-auto">
+                        {approvalLinkedAct.items.map((ai) => (
+                          <li key={ai.itemId} className="flex items-center justify-between text-[11px] border-b border-slate-100 pb-1 last:border-0">
+                            <span className="truncate font-medium text-slate-800">
+                              <strong className="font-mono text-blue-600">{ai.inventoryNumber}</strong> · {ai.name}
+                            </span>
+                            <span className="font-mono text-slate-600 shrink-0 ml-2">{ai.price.toFixed(2)} €</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : (
+                    <>
+                      <div className="font-semibold text-slate-900">{approvalModalItem.name}</div>
+                      <div className="text-slate-500 flex justify-between">
+                        <span>Inv. Nr.: <strong className="font-mono text-blue-600">{approvalModalItem.inventoryNumber}</strong></span>
+                        <span>Kaina: <strong className="font-mono">{approvalModalItem.purchasePrice.toFixed(2)} €</strong></span>
+                      </div>
+                      {approvalModalItem.writeOffReason && (
+                        <div className="text-rose-700 pt-1 border-t border-slate-200 mt-1">
+                          Priežastis: {approvalModalItem.writeOffReason}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                <form onSubmit={handleConfirmApproval} className="space-y-3 text-xs">
+                  <div>
+                    <label className="block text-slate-700 font-medium mb-1">
+                      Nurašymo ir archyvavimo metai *
+                    </label>
+                    <select
+                      value={approvalYear}
+                      onChange={(e) => setApprovalYear(Number(e.target.value))}
+                      className="w-full border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-rose-500 font-semibold text-slate-800"
+                    >
+                      {approvalYearOptions.map((y) => (
+                        <option key={y} value={y}>{y} metai</option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] text-slate-500 mt-1">
+                      Turtas bus perkeltas į nurašyto turto archyvą pagal pasirinktus metus.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-700 font-medium mb-1">
+                      Nurašymo akto Nr. *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={approvalActNumber}
+                      onChange={(e) => setApprovalActNumber(e.target.value)}
+                      placeholder={`NUR-${approvalYear}-001`}
+                      className="w-full border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-rose-500 font-mono font-medium"
+                    />
+                  </div>
+
+                  <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => setApprovalModalItem(null)}
+                      className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded cursor-pointer"
+                    >
+                      Atšaukti
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-3.5 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded shadow-xs cursor-pointer"
+                    >
+                      Patvirtinti ir archyvuoti
+                    </button>
+                  </div>
+                </form>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Write-off Rejection Modal */}
+      {rejectModalItem && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-5 space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-amber-600" />
+                <h3 className="text-sm font-semibold text-slate-900">
+                  Atmesti nurašymo teikimą
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRejectModalItem(null)}
+                className="text-slate-400 hover:text-slate-600 text-sm font-semibold cursor-pointer"
               >
                 ✕
               </button>
             </div>
 
             <div className="bg-slate-50 p-3 rounded border border-slate-200 text-xs space-y-1">
-              <div className="font-semibold text-slate-900">{approvalModalItem.name}</div>
-              <div className="text-slate-500 flex justify-between">
-                <span>Inv. Nr.: <strong className="font-mono text-blue-600">{approvalModalItem.inventoryNumber}</strong></span>
-                <span>Kaina: <strong className="font-mono">{approvalModalItem.purchasePrice.toFixed(2)} €</strong></span>
+              <div className="font-semibold text-slate-900">{rejectModalItem.name}</div>
+              <div className="text-slate-500">
+                Inv. Nr.: <strong className="font-mono text-blue-600">{rejectModalItem.inventoryNumber}</strong>
+                {rejectModalItem.writeOffActNumber ? ` · Projektas: ${rejectModalItem.writeOffActNumber}` : ''}
               </div>
-              {approvalModalItem.writeOffReason && (
-                <div className="text-rose-700 pt-1 border-t border-slate-200 mt-1">
-                  Priežastis: {approvalModalItem.writeOffReason}
-                </div>
-              )}
+              <p className="text-[11px] text-slate-600 pt-1">
+                Daiktas bus grąžintas į aktyvią apskaitą, atmetimo faktas išsaugotas istorijoje, o ankstesnis projektas nebegalės šio daikto nurašyti be naujo teikimo. Kiti tame pačiame projekte likę daiktai liks galioti.
+              </p>
             </div>
 
-            <form onSubmit={handleConfirmApproval} className="space-y-3 text-xs">
+            <form onSubmit={handleConfirmReject} className="space-y-3 text-xs">
               <div>
                 <label className="block text-slate-700 font-medium mb-1">
-                  Nurašymo ir archyvavimo metai * (pvz. 2026 m. arba 2020 m.)
+                  Atmetimo priežastis / pastaba komisijai
                 </label>
-                <select
-                  value={approvalYear}
-                  onChange={(e) => setApprovalYear(Number(e.target.value))}
-                  className="w-full border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-rose-500 font-semibold text-slate-800"
-                >
-                  <option value={2026}>2026 metai (Dabartiniai)</option>
-                  <option value={2025}>2025 metai</option>
-                  <option value={2024}>2024 metai</option>
-                  <option value={2023}>2023 metai</option>
-                  <option value={2022}>2022 metai</option>
-                  <option value={2021}>2021 metai</option>
-                  <option value={2020}>2020 metai (Archyvinis)</option>
-                </select>
-                <p className="text-[11px] text-slate-500 mt-1">
-                  Turtas bus perkeltas į nurašyto turto archyvą pagal pasirinktus metus.
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-slate-700 font-medium mb-1">
-                  Nurašymo akto Nr. *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={approvalActNumber}
-                  onChange={(e) => setApprovalActNumber(e.target.value)}
-                  placeholder={`NUR-${approvalYear}-01`}
-                  className="w-full border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-rose-500 font-mono font-medium"
+                <textarea
+                  rows={3}
+                  value={rejectReason}
+                  onChange={(e) => setRejectReason(e.target.value)}
+                  placeholder="pvz., Įrenginys suremontuotas ir tinkamas naudoti toliau..."
+                  className="w-full border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-amber-500 resize-none"
                 />
               </div>
 
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => setApprovalModalItem(null)}
+                  onClick={() => setRejectModalItem(null)}
                   className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded cursor-pointer"
                 >
                   Atšaukti
                 </button>
                 <button
                   type="submit"
-                  className="px-3.5 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded shadow-xs cursor-pointer"
+                  className="px-3.5 py-1.5 text-xs font-semibold text-white bg-amber-600 hover:bg-amber-700 rounded shadow-xs cursor-pointer"
                 >
-                  Patvirtinti ir archyvuoti
+                  Atmesti teikimą
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Restore From Archive Modal */}
+      {restoreModalItem && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-5 space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <RotateCcw className="w-5 h-5 text-emerald-600" />
+                <h3 className="text-sm font-semibold text-slate-900">
+                  Atkurti turtą iš archyvo į apskaitą
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRestoreModalItem(null)}
+                className="text-slate-400 hover:text-slate-600 text-sm font-semibold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="bg-slate-50 p-3 rounded border border-slate-200 text-xs space-y-1">
+              <div className="font-semibold text-slate-900">{restoreModalItem.name}</div>
+              <div className="text-slate-500 flex flex-wrap gap-2">
+                <span>Inv. Nr.: <strong className="font-mono text-blue-600">{restoreModalItem.inventoryNumber}</strong></span>
+                {restoreModalItem.writeOffActNumber && (
+                  <span>· Ankst. aktas: <strong className="font-mono">{restoreModalItem.writeOffActNumber}</strong></span>
+                )}
+                {restoreModalItem.writtenOffDate && (
+                  <span>({restoreModalItem.writtenOffDate})</span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-600 pt-1">
+                Ankstesnis patvirtintas nurašymo aktas liks istorijoje nepakeistas, o šio daikto kortelėje bus užfiksuotas atkūrimo faktas (kas, kada, kokios būklės ir kodėl atkūrė).
+              </p>
+            </div>
+
+            <form onSubmit={handleConfirmRestore} className="space-y-3 text-xs">
+              <div>
+                <label className="block text-slate-700 font-medium mb-1">
+                  Faktinė daikto būklė atkūrimo metu *
+                </label>
+                <select
+                  required
+                  value={restoreCondition}
+                  onChange={(e) => setRestoreCondition(e.target.value as ItemCondition | '')}
+                  className="w-full border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-emerald-500 font-medium text-slate-800"
+                >
+                  <option value="">-- Pasirinkite faktinę būklę --</option>
+                  <option value="new">Nauja</option>
+                  <option value="good">Gera</option>
+                  <option value="fair">Patenkinama</option>
+                  <option value="poor">Prasta (reikia remonto / tikrinama)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-medium mb-1">
+                  Atkūrimo priežastis / pagrindas *
+                </label>
+                <textarea
+                  required
+                  rows={3}
+                  value={restoreReason}
+                  onChange={(e) => setRestoreReason(e.target.value)}
+                  placeholder="pvz., Pakeitus maitinimo bloką įrenginys veikia; nurašymas buvo atšauktas komisijos sprendimu..."
+                  className="w-full border border-slate-300 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-emerald-500 resize-none"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setRestoreModalItem(null)}
+                  className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded cursor-pointer"
+                >
+                  Atšaukti
+                </button>
+                <button
+                  type="submit"
+                  disabled={!restoreCondition || !restoreReason.trim()}
+                  className="px-3.5 py-1.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-45 rounded shadow-xs cursor-pointer"
+                >
+                  Atkurti į apskaitą
                 </button>
               </div>
             </form>

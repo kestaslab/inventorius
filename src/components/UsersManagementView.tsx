@@ -724,7 +724,7 @@ Tomas Daukantas;tomas.d@tryskiumokykla.lt;Fizinio ugdymo mokytojas;teacher;S-01`
         const linkedItemsCount = items.filter((i) => i.responsibleUserId === userToDelete.id).length;
         const linkedRoomsCount = rooms.filter((r) => r.defaultResponsiblePersonId === userToDelete.id).length;
         const linkedDeptsCount = departments.filter((d) => d.managerId === userToDelete.id).length;
-        const linkedAuditsCount = auditSessions.filter((s) => s.committeeChairmanId === userToDelete.id).length;
+        const linkedAuditsCount = auditSessions.filter((s) => s.status !== 'completed' && s.committeeChairmanId === userToDelete.id).length;
         const isInUse = linkedItemsCount > 0 || linkedRoomsCount > 0 || linkedDeptsCount > 0 || linkedAuditsCount > 0;
         const transferCandidates = users.filter((u) => u.id !== userToDelete.id && !u.isArchived);
 

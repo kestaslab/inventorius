@@ -307,9 +307,11 @@ test('Used departments, rooms, and users cannot be deleted directly; transfer-an
   assert.equal(validateAndMigrateDatabase(resDeptTd.database).ok, true);
 });
 
-test('Real production school_database.json stays valid and compatible with Stage 2 schema', () => {
+test('Production school_database.json (when present) or migrated fixture stays valid and compatible with Stage 2 schema', () => {
   const realPath = path.resolve(process.cwd(), 'data/school_database.json');
-  const raw = JSON.parse(fs.readFileSync(realPath, 'utf-8'));
+  const raw = fs.existsSync(realPath)
+    ? JSON.parse(fs.readFileSync(realPath, 'utf-8'))
+    : { ...buildFixtureDb(), version: '1.0.0' };
   const res = validateAndMigrateDatabase(raw);
   assert.equal(res.ok, true, res.ok ? '' : res.error);
 });

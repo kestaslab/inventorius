@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   FileText, 
   Download, 
@@ -6,7 +6,9 @@ import {
   UserCheck, 
   CheckCircle, 
   Building2,
-  FileSpreadsheet
+  FileSpreadsheet,
+  AlertTriangle,
+  Archive
 } from 'lucide-react';
 import { 
   InventoryItem, 
@@ -22,6 +24,12 @@ import {
   ASSET_CLASS_LABELS,
   formatRoomName
 } from '../types/inventory';
+import {
+  getWriteOffActYear,
+  filterWriteOffActsByYear,
+  resolveActiveWriteOffAct,
+  analyzeWriteOffIntegrity,
+} from '../utils/writeOffUtils';
 
 interface ReportsViewProps {
   items: InventoryItem[];
@@ -32,7 +40,12 @@ interface ReportsViewProps {
   currentUser: User;
   onExportCSV: () => void;
   onSaveWriteOffAct: (act: WriteOffAct) => void;
-  onApproveWriteOffAct?: (actId: string, approvalYear: number) => void;
+  onApproveWriteOffAct?: (actId: string, approvalYear: number, customActNumber?: string) => void;
+  onReconcileWriteOffIssue?: (
+    action: 'return_to_active' | 'remove_stale_draft_item' | 'link_by_existing_act_number',
+    itemId?: string,
+    actId?: string
+  ) => void;
 }
 
 export const ReportsView: React.FC<ReportsViewProps> = ({
@@ -45,6 +58,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   onExportCSV,
   onSaveWriteOffAct,
   onApproveWriteOffAct,
+  onReconcileWriteOffIssue,
 }) => {
   const [reportType, setReportType] = useState<'inventory_sheet' | 'writeoff_act' | 'user_sheet'>('inventory_sheet');
 
@@ -59,23 +73,55 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   const [selectedWriteOffActId, setSelectedWriteOffActId] = useState<string>(writeOffActs[0]?.id || '');
   const [filterActYear, setFilterActYear] = useState<'all' | number>('all');
   const [selectedApprovalYear, setSelectedApprovalYear] = useState<number>(new Date().getFullYear());
+  const [approvalActNumber, setApprovalActNumber] = useState<string>('');
 
   const actYears = useMemo(() => {
     const years = new Set<number>();
     writeOffActs.forEach(a => {
-      const yr = a.actYear || (a.date ? new Date(a.date).getFullYear() : 2026);
-      years.add(yr);
+      years.add(getWriteOffActYear(a));
     });
     return Array.from(years).sort((a, b) => b - a);
   }, [writeOffActs]);
 
-  const displayedActs = useMemo(() => {
-    if (filterActYear === 'all') return writeOffActs;
-    return writeOffActs.filter(a => {
-      const yr = a.actYear || (a.date ? new Date(a.date).getFullYear() : 2026);
-      return yr === filterActYear;
-    });
-  }, [writeOffActs, filterActYear]);
+  const approvalYearOptions = useMemo(() => {
+    const maxYear = new Date().getFullYear() + 1;
+    const minYear = Math.min(2020, ...(actYears.length > 0 ? actYears : [2020]));
+    const arr: number[] = [];
+    for (let y = maxYear; y >= minYear; y--) arr.push(y);
+    return arr;
+  }, [actYears]);
+
+  const displayedActs = useMemo(
+    () => filterWriteOffActsByYear(writeOffActs, filterActYear),
+    [writeOffActs, filterActYear]
+  );
+
+  const activeWriteOff = useMemo(
+    () => resolveActiveWriteOffAct(displayedActs, selectedWriteOffActId),
+    [displayedActs, selectedWriteOffActId]
+  );
+
+  useEffect(() => {
+    if (displayedActs.length === 0) {
+      if (selectedWriteOffActId !== '') setSelectedWriteOffActId('');
+    } else if (!displayedActs.some((a) => a.id === selectedWriteOffActId)) {
+      setSelectedWriteOffActId(displayedActs[0].id);
+    }
+  }, [displayedActs, selectedWriteOffActId]);
+
+  useEffect(() => {
+    if (activeWriteOff) {
+      setApprovalActNumber(activeWriteOff.actNumber);
+      setSelectedApprovalYear(getWriteOffActYear(activeWriteOff));
+    } else {
+      setApprovalActNumber('');
+    }
+  }, [activeWriteOff?.id, activeWriteOff?.actNumber]);
+
+  const writeOffIntegrityIssues = useMemo(
+    () => analyzeWriteOffIntegrity(items, writeOffActs),
+    [items, writeOffActs]
+  );
 
   // Filtered items for current report
   const reportItems = useMemo(() => {
@@ -113,14 +159,15 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
 
   const totalPurchaseValue = reportItems.reduce((acc, i) => acc + (i.purchasePrice || 0), 0);
 
-  const activeWriteOff = writeOffActs.find(a => a.id === selectedWriteOffActId) || displayedActs[0] || writeOffActs[0];
-
   const selectedDepartment = departments.find(d => d.id === filterDeptId);
   const selectedRoom = rooms.find(r => r.id === filterRoomId);
   const selectedUser = users.find(u => u.id === (reportType === 'user_sheet' ? (filterUserId === 'all' ? users[0]?.id : filterUserId) : filterUserId));
 
+  const isExportDisabled = reportType === 'writeoff_act' && !activeWriteOff;
+
   // --- DOCX / Word File Download Generator ---
   const handleDownloadWordDoc = () => {
+    if (reportType === 'writeoff_act' && !activeWriteOff) return;
     let title = '';
     let bodyContent = '';
     const dateStr = new Date().toISOString().slice(0, 10);
@@ -348,6 +395,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
 
   // --- Specific Excel Export for the Active Report ---
   const handleDownloadExcel = () => {
+    if (reportType === 'writeoff_act' && !activeWriteOff) return;
     let csv = '';
     const dateStr = new Date().toISOString().slice(0, 10);
     let filename = '';
@@ -422,16 +470,18 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           <div className="flex items-center gap-2">
             <button
               onClick={handleDownloadExcel}
+              disabled={isExportDisabled}
               title="Atsisiųsti paruoštą ataskaitą Excel lentelės formatu"
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-800 bg-white border border-slate-300 rounded-md hover:bg-slate-50 transition-colors cursor-pointer shadow-xs"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-800 bg-white border border-slate-300 rounded-md hover:bg-slate-50 disabled:opacity-45 disabled:pointer-events-none transition-colors cursor-pointer shadow-xs"
             >
               <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
               <span>Atsisiųsti Excel (XLSX/CSV)</span>
             </button>
             <button
               onClick={handleDownloadWordDoc}
+              disabled={isExportDisabled}
               title="Atsisiųsti oficialų dokumentą Microsoft Word (DOCX) formatu"
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-md transition-colors shadow-xs cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-45 disabled:pointer-events-none rounded-md transition-colors shadow-xs cursor-pointer"
             >
               <FileText className="w-3.5 h-3.5" />
               <span>Atsisiųsti Word (DOCX)</span>
@@ -590,39 +640,74 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                 <div className="flex items-center gap-2">
                   <label className="text-slate-600 font-medium">Pasirinkite aktą:</label>
                   <select
-                    value={selectedWriteOffActId}
+                    value={activeWriteOff?.id || ''}
+                    disabled={displayedActs.length === 0}
                     onChange={(e) => setSelectedWriteOffActId(e.target.value)}
-                    className="bg-white border border-slate-300 rounded px-3 py-1.5 font-mono"
+                    className="bg-white border border-slate-300 rounded px-3 py-1.5 font-mono disabled:bg-slate-100 disabled:text-slate-400"
                   >
-                    {displayedActs.map(act => (
-                      <option key={act.id} value={act.id}>
-                        {act.actNumber} ({act.date}) — {act.items.length} vnt. [{act.status === 'approved' ? `Patvirtintas (${act.actYear || 2025} m.)` : 'Projektas'}]
-                      </option>
-                    ))}
+                    {displayedActs.length === 0 ? (
+                      <option value="">Šiais metais nurašymo aktų nėra</option>
+                    ) : (
+                      displayedActs.map(act => (
+                        <option key={act.id} value={act.id}>
+                          {act.actNumber} ({act.date}) — {act.items.length} vnt. [
+                          {act.status === 'approved'
+                            ? `Patvirtintas (${getWriteOffActYear(act)} m.)`
+                            : act.status === 'cancelled'
+                            ? 'Atšauktas / atmesta'
+                            : 'Projektas'}
+                          ]
+                        </option>
+                      ))
+                    )}
                   </select>
                 </div>
               </div>
 
               {/* Approval controls if draft */}
               {activeWriteOff && activeWriteOff.status === 'draft' && (
-                <div className="flex items-center gap-2 bg-rose-50 border border-rose-200 px-3 py-1.5 rounded-md">
+                <div className="flex flex-wrap items-center gap-2 bg-rose-50 border border-rose-200 px-3 py-1.5 rounded-md">
                   <span className="font-semibold text-rose-900">Aktas nepatvirtintas:</span>
+                  <input
+                    type="text"
+                    value={approvalActNumber}
+                    onChange={(e) => setApprovalActNumber(e.target.value)}
+                    title="Nurašymo akto numeris"
+                    className="w-32 bg-white border border-rose-300 text-xs rounded px-2 py-1 font-mono font-semibold text-slate-800"
+                  />
                   <select
                     value={selectedApprovalYear}
                     onChange={(e) => setSelectedApprovalYear(Number(e.target.value))}
                     className="bg-white border border-rose-300 text-xs rounded px-2 py-1 font-semibold text-slate-800"
                   >
-                    <option value={2026}>2026 metai</option>
-                    <option value={2025}>2025 metai</option>
-                    <option value={2020}>2020 metai</option>
+                    {approvalYearOptions.map((y) => (
+                      <option key={y} value={y}>{y} metai</option>
+                    ))}
                   </select>
                   <button
-                    onClick={() => onApproveWriteOffAct && onApproveWriteOffAct(activeWriteOff.id, selectedApprovalYear)}
-                    className="inline-flex items-center gap-1 px-3 py-1 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded shadow-2xs cursor-pointer"
+                    disabled={activeWriteOff.items.length === 0}
+                    onClick={() =>
+                      onApproveWriteOffAct &&
+                      onApproveWriteOffAct(
+                        activeWriteOff.id,
+                        selectedApprovalYear,
+                        approvalActNumber.trim() || activeWriteOff.actNumber
+                      )
+                    }
+                    className="inline-flex items-center gap-1 px-3 py-1 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-50 rounded shadow-2xs cursor-pointer"
                   >
                     <CheckCircle className="w-3.5 h-3.5" />
-                    <span>Patvirtinti aktą ir archyvuoti turtą</span>
+                    <span>Patvirtinti aktą ir archyvuoti turtą ({activeWriteOff.items.length} vnt.)</span>
                   </button>
+                </div>
+              )}
+
+              {activeWriteOff && activeWriteOff.status === 'cancelled' && (
+                <div className="flex items-center gap-1.5 bg-slate-100 text-slate-700 border border-slate-300 px-3 py-1.5 rounded-md font-medium text-xs">
+                  <AlertTriangle className="w-4 h-4 text-slate-500 shrink-0" />
+                  <span>
+                    Nurašymo projektas atšauktas atmetus visus pateiktus daiktus.
+                  </span>
                 </div>
               )}
 
@@ -630,11 +715,54 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                 <div className="flex items-center gap-1.5 bg-emerald-50 text-emerald-800 border border-emerald-200 px-3 py-1.5 rounded-md font-medium text-xs">
                   <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
                   <span>
-                    Aktas patvirtintas {activeWriteOff.approvedDate || activeWriteOff.date} · Archyvo metai: <strong>{activeWriteOff.actYear || 2025} m.</strong>
+                    Aktas patvirtintas {activeWriteOff.approvedDate || activeWriteOff.date} · Archyvo metai: <strong>{getWriteOffActYear(activeWriteOff)} m.</strong>
                   </span>
                 </div>
               )}
             </div>
+
+            {writeOffIntegrityIssues.length > 0 && (
+              <div className="p-3 rounded-lg border border-amber-300 bg-amber-50 text-amber-950 space-y-1.5">
+                <div className="font-bold flex items-center gap-1.5 text-amber-900">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>Aptikti nurašymo aktų ir turto duomenų neatitikimai ({writeOffIntegrityIssues.length}):</span>
+                </div>
+                <ul className="space-y-1.5 text-[11px]">
+                  {writeOffIntegrityIssues.map((issue) => (
+                    <li key={issue.id} className="flex flex-wrap items-center justify-between gap-2 bg-white/70 px-2.5 py-1.5 rounded border border-amber-200">
+                      <span>{issue.message}</span>
+                      {onReconcileWriteOffIssue && issue.canReturnToActive && issue.itemId && (
+                        <button
+                          type="button"
+                          onClick={() => onReconcileWriteOffIssue('return_to_active', issue.itemId)}
+                          className="px-2 py-0.5 bg-amber-600 hover:bg-amber-700 text-white font-semibold rounded cursor-pointer"
+                        >
+                          Grąžinti į aktyvų sąrašą
+                        </button>
+                      )}
+                      {onReconcileWriteOffIssue && issue.canRemoveFromDraftAct && issue.actId && issue.itemId && (
+                        <button
+                          type="button"
+                          onClick={() => onReconcileWriteOffIssue('remove_stale_draft_item', issue.itemId, issue.actId)}
+                          className="px-2 py-0.5 bg-amber-600 hover:bg-amber-700 text-white font-semibold rounded cursor-pointer"
+                        >
+                          Pašalinti iš projekto
+                        </button>
+                      )}
+                      {onReconcileWriteOffIssue && issue.canLinkExistingAct && issue.itemId && issue.matchingActId && (
+                        <button
+                          type="button"
+                          onClick={() => onReconcileWriteOffIssue('link_by_existing_act_number', issue.itemId, issue.matchingActId)}
+                          className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded cursor-pointer"
+                        >
+                          Susieti su esamu aktu
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         )}
 
@@ -816,6 +944,30 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
             </div>
           )}
 
+          {/* REPORT 2: EMPTY STATE WHEN FILTER HAS NO ACTS */}
+          {reportType === 'writeoff_act' && !activeWriteOff && (
+            <div className="py-20 text-center space-y-3 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50/70">
+              <Archive className="w-10 h-10 text-slate-300 mx-auto" />
+              <div className="text-sm font-bold text-slate-800">
+                {filterActYear === 'all'
+                  ? 'Nėra suformuotų nurašymo aktų'
+                  : `${filterActYear} metais nurašymo aktų nerasta`}
+              </div>
+              <p className="text-xs text-slate-500 max-w-md mx-auto">
+                Pasirinkite kitus metus arba „Visi metai“, arba teikite netinkamą naudoti turtą nurašymui inventoriaus sąraše.
+              </p>
+              {filterActYear !== 'all' && writeOffActs.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setFilterActYear('all')}
+                  className="px-3.5 py-1.5 text-xs font-semibold text-white bg-purple-600 hover:bg-purple-700 rounded-md cursor-pointer"
+                >
+                  Rodyti visų metų aktus ({writeOffActs.length})
+                </button>
+              )}
+            </div>
+          )}
+
           {/* REPORT 2: WRITE-OFF ACT (Without Residual Value) */}
           {reportType === 'writeoff_act' && activeWriteOff && (
             <div>
@@ -829,6 +981,10 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                   {activeWriteOff.status === 'approved' ? (
                     <span className="ml-2 font-sans font-semibold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded text-[10px]">
                       Patvirtintas aktas
+                    </span>
+                  ) : activeWriteOff.status === 'cancelled' ? (
+                    <span className="ml-2 font-sans font-semibold text-slate-700 bg-slate-200 px-2 py-0.5 rounded text-[10px]">
+                      Atšauktas projektas
                     </span>
                   ) : (
                     <span className="ml-2 font-sans font-semibold text-rose-800 bg-rose-100 px-2 py-0.5 rounded text-[10px]">
@@ -861,15 +1017,36 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-400">
-                  {activeWriteOff.items.map((item, idx) => (
-                    <tr key={item.itemId}>
-                      <td className="p-1.5 border-r border-slate-900 text-center font-mono">{idx + 1}</td>
-                      <td className="p-1.5 border-r border-slate-900 font-mono font-semibold">{item.inventoryNumber}</td>
-                      <td className="p-1.5 border-r border-slate-900 font-medium">{item.name}</td>
-                      <td className="p-1.5 border-r border-slate-900 text-right font-mono tabular-nums">{item.price.toFixed(2)}</td>
-                      <td className="p-1.5 text-slate-700">{item.reason}</td>
-                    </tr>
-                  ))}
+                  {activeWriteOff.items.map((item, idx) => {
+                    const liveItem = items.find((i) => i.id === item.itemId);
+                    const restoredFromThisAct = liveItem?.writeOffHistory?.find(
+                      (h) =>
+                        h.restoredAt &&
+                        ((h.actId && h.actId === activeWriteOff.id) ||
+                          (h.actNumber &&
+                            h.actNumber.trim().toUpperCase() ===
+                              activeWriteOff.actNumber.trim().toUpperCase()))
+                    );
+
+                    return (
+                      <tr key={item.itemId}>
+                        <td className="p-1.5 border-r border-slate-900 text-center font-mono">{idx + 1}</td>
+                        <td className="p-1.5 border-r border-slate-900 font-mono font-semibold">{item.inventoryNumber}</td>
+                        <td className="p-1.5 border-r border-slate-900 font-medium">
+                          <div>{item.name}</div>
+                          {restoredFromThisAct && (
+                            <div className="text-[10px] text-amber-800 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded mt-1">
+                              Atšauktas nurašymas: atkurta į apskaitą {restoredFromThisAct.restoredAt?.slice(0, 10)}
+                              {restoredFromThisAct.restoredByUserName ? ` (${restoredFromThisAct.restoredByUserName})` : ''}
+                              {restoredFromThisAct.restorationReason ? ` — ${restoredFromThisAct.restorationReason}` : ''}
+                            </div>
+                          )}
+                        </td>
+                        <td className="p-1.5 border-r border-slate-900 text-right font-mono tabular-nums">{item.price.toFixed(2)}</td>
+                        <td className="p-1.5 text-slate-700">{item.reason}</td>
+                      </tr>
+                    );
+                  })}
                   <tr className="bg-slate-100 font-bold border-t border-slate-900">
                     <td colSpan={3} className="p-1.5 text-right border-r border-slate-900 uppercase">BENDRA SUMA:</td>
                     <td className="p-1.5 text-right border-r border-slate-900 font-mono tabular-nums">
@@ -879,6 +1056,21 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                   </tr>
                 </tbody>
               </table>
+
+              {/* Rejected items audit note inside draft/cancelled act */}
+              {activeWriteOff.rejectedItems && activeWriteOff.rejectedItems.length > 0 && (
+                <div className="mb-6 p-3 bg-slate-50 border border-slate-300 rounded text-[11px] space-y-1">
+                  <div className="font-bold text-slate-800">
+                    Atmesti nurašymo teikimai iš šio projekto ({activeWriteOff.rejectedItems.length}):
+                  </div>
+                  {activeWriteOff.rejectedItems.map((rej) => (
+                    <div key={`${rej.itemId}-${rej.rejectedAt}`} className="text-slate-600">
+                      • <strong>[{rej.inventoryNumber}] {rej.name}</strong> — atmesta {rej.rejectedAt.slice(0, 10)}
+                      {rej.rejectedByUserName ? ` (${rej.rejectedByUserName})` : ''}: {rej.rejectionReason}
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {/* Signatures */}
               <div className="space-y-4 pt-6 text-xs">

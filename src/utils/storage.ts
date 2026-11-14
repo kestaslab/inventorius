@@ -24,7 +24,12 @@ import {
   CURRENT_DB_VERSION,
   validateAndMigrateDatabase,
 } from './databaseValidation';
-import { DbMutation, applyDbMutation } from './dbOperations';
+import {
+  DbMutation,
+  applyDbMutation,
+  getTouchedEntityKeys,
+  getOperationReferencedKeys,
+} from './dbOperations';
 
 export type { AppDatabase } from './databaseValidation';
 export type { DbMutation } from './dbOperations';
@@ -53,6 +58,25 @@ export type SyncStatus =
   | 'local_preview'
   | 'uninitialized';
 
+export interface PendingOp {
+  clientOpId: string;
+  baseRevision: number;
+  operation: DbMutation;
+  createdAt: string;
+  precedingClientOpIds?: string[];
+  status?: 'pending' | 'needs_resolution';
+  blockedReason?: string;
+  blockedByOpId?: string;
+}
+
+export interface RejectedOpRecord {
+  clientOpId: string;
+  operation: DbMutation;
+  errorMessage: string;
+  statusCode: number;
+  rejectedAt: string;
+}
+
 export interface SyncState {
   status: SyncStatus;
   revision: number;
@@ -60,15 +84,12 @@ export interface SyncState {
   lastSavedAt?: string;
   errorMessage?: string;
   pendingCount: number;
+  blockedCount: number;
+  memoryOnlyQueue?: boolean;
   localPreviewMode: boolean;
   storageWarning?: string;
-}
-
-interface PendingOp {
-  clientOpId: string;
-  baseRevision: number;
-  operation: DbMutation;
-  createdAt: string;
+  blockedOps?: PendingOp[];
+  rejectedOps?: RejectedOpRecord[];
 }
 
 function isQuotaError(err: unknown): boolean {
@@ -80,11 +101,25 @@ function isQuotaError(err: unknown): boolean {
       err.code === 1014
     );
   }
+  if (err && typeof err === 'object' && 'name' in err) {
+    const name = String((err as { name?: unknown }).name);
+    return name === 'QuotaExceededError' || name === 'NS_ERROR_DOM_QUOTA_REACHED';
+  }
   return false;
+}
+
+function safeGetLocalStorage(key: string): string | null {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
 }
 
 function safeSetLocalStorage(key: string, value: string): { ok: boolean; quotaExceeded?: boolean } {
   try {
+    if (typeof localStorage === 'undefined') return { ok: false };
     localStorage.setItem(key, value);
     return { ok: true };
   } catch (err) {
@@ -97,6 +132,15 @@ function safeSetLocalStorage(key: string, value: string): { ok: boolean; quotaEx
   }
 }
 
+function safeRemoveLocalStorage(key: string): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.removeItem(key);
+  } catch {
+    // ignore
+  }
+}
+
 function createOpId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
@@ -104,53 +148,75 @@ function createOpId(): string {
   return `op-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-// Vidinė būsena atmintyje (apsauga net jei localStorage pilna)
-let memoryDb: AppDatabase | null = null;
-let serverRevision: number = (() => {
+function readPendingOpsFromStorage(): PendingOp[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEYS.SERVER_REVISION);
+    const raw = safeGetLocalStorage(STORAGE_KEYS.PENDING_OPS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function readInitialServerRevision(): number {
+  try {
+    const raw = safeGetLocalStorage(STORAGE_KEYS.SERVER_REVISION);
     const parsed = raw ? parseInt(raw, 10) : 0;
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
   } catch {
     return 0;
   }
-})();
+}
 
-let syncState: SyncState = {
-  status: (() => {
-    try {
-      return localStorage.getItem(STORAGE_KEYS.LOCAL_PREVIEW) === 'true'
-        ? 'local_preview'
-        : 'loading';
-    } catch {
-      return 'loading';
-    }
-  })(),
-  revision: serverRevision,
-  serverHasDb: serverRevision > 0,
-  pendingCount: (() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEYS.PENDING_OPS);
-      const parsed = raw ? JSON.parse(raw) : [];
-      return Array.isArray(parsed) ? parsed.length : 0;
-    } catch {
-      return 0;
-    }
-  })(),
-  localPreviewMode: (() => {
-    try {
-      return localStorage.getItem(STORAGE_KEYS.LOCAL_PREVIEW) === 'true';
-    } catch {
-      return false;
-    }
-  })(),
-};
+function readInitialLocalPreview(): boolean {
+  return safeGetLocalStorage(STORAGE_KEYS.LOCAL_PREVIEW) === 'true';
+}
+
+// Autoritetinga darbinės atminties būsena (veikia net kai localStorage meta klaidą ar yra pilna)
+let memoryDb: AppDatabase | null = null;
+let serverRevision: number = readInitialServerRevision();
+let memoryPendingOps: PendingOp[] = readPendingOpsFromStorage();
+let memoryRejectedOps: RejectedOpRecord[] = [];
+let queueStorageWarning: string | undefined = undefined;
+let cacheStorageWarning: string | undefined = undefined;
+
+function composeStorageWarning(): string | undefined {
+  if (queueStorageWarning && cacheStorageWarning) {
+    return `${queueStorageWarning} ${cacheStorageWarning}`;
+  }
+  return queueStorageWarning || cacheStorageWarning;
+}
+
+function buildInitialSyncState(): SyncState {
+  const sendableCount = memoryPendingOps.filter((o) => o.status !== 'needs_resolution').length;
+  const blockedOps = memoryPendingOps.filter((o) => o.status === 'needs_resolution');
+  const localPreview = readInitialLocalPreview();
+  return {
+    status: localPreview ? 'local_preview' : 'loading',
+    revision: serverRevision,
+    serverHasDb: serverRevision > 0,
+    pendingCount: sendableCount,
+    blockedCount: blockedOps.length,
+    memoryOnlyQueue: false,
+    localPreviewMode: localPreview,
+    blockedOps: blockedOps.length > 0 ? blockedOps : undefined,
+    rejectedOps: memoryRejectedOps.length > 0 ? memoryRejectedOps : undefined,
+    storageWarning: composeStorageWarning(),
+  };
+}
+
+let syncState: SyncState = buildInitialSyncState();
 
 const syncListeners = new Set<(state: SyncState) => void>();
 const dbUpdateListeners = new Set<(db: AppDatabase) => void>();
 
 function notifySyncListeners() {
-  const snapshot = { ...syncState };
+  const snapshot = {
+    ...syncState,
+    blockedOps: syncState.blockedOps ? [...syncState.blockedOps] : undefined,
+    rejectedOps: syncState.rejectedOps ? [...syncState.rejectedOps] : undefined,
+  };
   syncListeners.forEach((cb) => cb(snapshot));
 }
 
@@ -164,25 +230,36 @@ function notifyDbListeners(db: AppDatabase) {
 }
 
 function getPendingOps(): PendingOp[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEYS.PENDING_OPS);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  return [...memoryPendingOps];
 }
 
-function setPendingOps(ops: PendingOp[]) {
-  const res = safeSetLocalStorage(STORAGE_KEYS.PENDING_OPS, JSON.stringify(ops));
-  if (!res.ok && res.quotaExceeded) {
-    updateSyncState({
-      storageWarning:
-        'Naršyklės vietinė talpykla pilna. Dideli failai (nuotraukos) gali būti neišsaugoti neprisijungus, kol neatnaujinsite ryšio su serveriu.',
-    });
+function setPendingOps(ops: PendingOp[]): boolean {
+  memoryPendingOps = [...ops];
+  const res = safeSetLocalStorage(STORAGE_KEYS.PENDING_OPS, JSON.stringify(memoryPendingOps));
+
+  const sendableCount = memoryPendingOps.filter((o) => o.status !== 'needs_resolution').length;
+  const blockedOps = memoryPendingOps.filter((o) => o.status === 'needs_resolution');
+  const hasAnyQueued = memoryPendingOps.length > 0;
+
+  let memoryOnlyQueue = false;
+  if (!res.ok && hasAnyQueued) {
+    memoryOnlyQueue = true;
+    queueStorageWarning =
+      'Nepavyko įrašyti pakeitimų eilės į naršyklės saugyklą (localStorage). Pakeitimai laikomi tik darbinėje atmintyje – uždarius ar perkrovus puslapį prieš išsaugant serveryje, jie bus prarasti!';
+  } else {
+    memoryOnlyQueue = false;
+    queueStorageWarning = undefined;
   }
-  updateSyncState({ pendingCount: ops.length });
+
+  updateSyncState({
+    pendingCount: sendableCount,
+    blockedCount: blockedOps.length,
+    blockedOps: blockedOps.length > 0 ? blockedOps : undefined,
+    memoryOnlyQueue,
+    storageWarning: composeStorageWarning(),
+  });
+
+  return res.ok;
 }
 
 function persistSnapshotToLocalCache(db: AppDatabase, isServerAuthoritative: boolean) {
@@ -205,14 +282,13 @@ function persistSnapshotToLocalCache(db: AppDatabase, isServerAuthoritative: boo
     results.push(safeSetLocalStorage(STORAGE_KEYS.AUTH_SETTINGS, JSON.stringify(db.authSettings)));
   }
 
-  if (results.some((r) => r.quotaExceeded)) {
-    updateSyncState({
-      storageWarning:
-        'Naršyklės vietinė saugykla (localStorage) pasiekė talpos limitą. Pakeitimai išliko darbinėje atmintyje ir siunčiami į serverį.',
-    });
-  } else if (syncState.storageWarning) {
-    updateSyncState({ storageWarning: undefined });
+  if (results.some((r) => !r.ok)) {
+    cacheStorageWarning =
+      'Naršyklės vietinė saugykla (localStorage) negalėjo išsaugoti visų duomenų kopijos – duomenys laikomi darbinėje atmintyje.';
+  } else {
+    cacheStorageWarning = undefined;
   }
+  updateSyncState({ storageWarning: composeStorageWarning() });
 }
 
 function buildDemoDatabase(): AppDatabase {
@@ -233,24 +309,90 @@ function buildDemoDatabase(): AppDatabase {
 
 let activeQueuePromise: Promise<{ ok: boolean; error?: string; conflict?: boolean }> | null = null;
 
+async function fetchAuthoritativeServerDbSafely(): Promise<AppDatabase | null> {
+  try {
+    const res = await fetch('/api/database');
+    if (!res.ok) return null;
+    const raw = await res.json();
+    if (!raw) return null;
+    const validation = validateAndMigrateDatabase(raw);
+    if (!validation.ok) return null;
+    return validation.data;
+  } catch {
+    return null;
+  }
+}
+
+function replayActiveOpsOverServerDb(serverDb: AppDatabase, ops: PendingOp[]): AppDatabase {
+  let acc = serverDb;
+  for (const op of ops) {
+    if (op.status === 'needs_resolution') continue;
+    const applied = applyDbMutation(acc, op.operation);
+    if (applied.ok) {
+      acc = applied.database;
+    }
+  }
+  return acc;
+}
+
 async function processMutationQueue(): Promise<{ ok: boolean; error?: string; conflict?: boolean }> {
   if (activeQueuePromise) {
     return activeQueuePromise;
   }
 
   activeQueuePromise = (async () => {
+    let confirmedServerWriteThisPass = false;
+    let batchRejectionError: string | undefined = undefined;
+
     try {
       while (true) {
-        const ops = getPendingOps();
-        if (ops.length === 0) {
-          if (syncState.status === 'saving' || syncState.status === 'error') {
+        const allOps = getPendingOps();
+        const sendableOps = allOps.filter((o) => o.status !== 'needs_resolution');
+        const blockedOps = allOps.filter((o) => o.status === 'needs_resolution');
+
+        if (sendableOps.length === 0) {
+          if (blockedOps.length > 0 || batchRejectionError || memoryRejectedOps.length > 0) {
+            const finalErr =
+              batchRejectionError ||
+              syncState.errorMessage ||
+              `Dalis operacijų reikalauja sprendimo (${blockedOps.length}).`;
             updateSyncState({
-              status: syncState.localPreviewMode ? 'local_preview' : 'saved',
+              status: 'error',
+              errorMessage: finalErr,
+              pendingCount: 0,
+              blockedCount: blockedOps.length,
+              blockedOps: blockedOps.length > 0 ? blockedOps : undefined,
+              rejectedOps: memoryRejectedOps.length > 0 ? [...memoryRejectedOps] : undefined,
+            });
+            return { ok: false, error: finalErr };
+          }
+
+          if (syncState.localPreviewMode) {
+            updateSyncState({ status: 'local_preview', pendingCount: 0, blockedCount: 0 });
+            return { ok: true };
+          }
+
+          if (confirmedServerWriteThisPass) {
+            updateSyncState({
+              status: 'saved',
               errorMessage: undefined,
               pendingCount: 0,
+              blockedCount: 0,
+              memoryOnlyQueue: false,
             });
+            return { ok: true };
           }
-          return { ok: true };
+
+          // Be tikro serverio patvirtinimo šio siuntimo metu NIEKADA neperjungiame į „saved“ iš „saving“/„error“!
+          if (syncState.status === 'saved') {
+            return { ok: true };
+          }
+          return {
+            ok: false,
+            error:
+              syncState.errorMessage ||
+              'Nėra patvirtinto išsaugojimo serveryje (eilė buvo tuščia be patvirtinimo).',
+          };
         }
 
         if (syncState.localPreviewMode) {
@@ -258,11 +400,12 @@ async function processMutationQueue(): Promise<{ ok: boolean; error?: string; co
           return { ok: true };
         }
 
-        const head = ops[0];
+        const head = sendableOps[0];
         updateSyncState({
           status: 'saving',
-          errorMessage: undefined,
-          pendingCount: ops.length,
+          errorMessage: batchRejectionError,
+          pendingCount: sendableOps.length,
+          blockedCount: blockedOps.length,
         });
 
         let response: Response;
@@ -271,21 +414,27 @@ async function processMutationQueue(): Promise<{ ok: boolean; error?: string; co
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              baseRevision: head.baseRevision || serverRevision,
+              baseRevision: head.baseRevision > 0 ? head.baseRevision : serverRevision,
               clientOpId: head.clientOpId,
               operation: head.operation,
+              ...(head.precedingClientOpIds && head.precedingClientOpIds.length > 0
+                ? { precedingClientOpIds: head.precedingClientOpIds }
+                : {}),
             }),
           });
         } catch {
+          const netErr = syncState.memoryOnlyQueue
+            ? 'Nepavyko išsaugoti: nėra ryšio su serveriu. Pakeitimai laikomi tik darbinėje atmintyje – neuždarykite puslapio ir paspauskite „Bandyti dar kartą“.'
+            : 'Nepavyko išsaugoti: nėra ryšio su serveriu. Jūsų pakeitimai išsaugoti naršyklėje – paspauskite „Bandyti dar kartą“.';
           updateSyncState({
             status: 'error',
-            pendingCount: ops.length,
-            errorMessage:
-              'Nepavyko išsaugoti: nėra ryšio su serveriu. Jūsų pakeitimai išsaugoti naršyklėje – paspauskite „Bandyti dar kartą“.',
+            pendingCount: sendableOps.length,
+            blockedCount: blockedOps.length,
+            errorMessage: netErr,
           });
           return {
             ok: false,
-            error: 'Nepavyko prisijungti prie serverio. Pakeitimai neištrinti ir laukia išsaugojimo.',
+            error: netErr,
           };
         }
 
@@ -297,28 +446,50 @@ async function processMutationQueue(): Promise<{ ok: boolean; error?: string; co
         }
 
         if (response.ok && payload?.success && payload?.database) {
+          confirmedServerWriteThisPass = true;
           const nextRevision =
             typeof payload.revision === 'number'
               ? payload.revision
               : payload.database.revision || serverRevision + 1;
 
-          // Pašaliname įvykdytą operaciją ir perkeliame sekančių laukiančių operacijų baseRevision
-          const remaining = getPendingOps().slice(1).map((nextOp) => ({
-            ...nextOp,
-            baseRevision: nextRevision,
-          }));
+          // Pašaliname TIK įvykdytą operaciją ir NIEKADA neperrašome kitų laukiančių operacijų baseRevision!
+          const remaining = getPendingOps().filter((op) => op.clientOpId !== head.clientOpId);
           setPendingOps(remaining);
 
           const serverDb = payload.database as AppDatabase;
-          persistSnapshotToLocalCache(serverDb, true);
+          const remainingSendable = remaining.filter((o) => o.status !== 'needs_resolution');
+          const remainingBlocked = remaining.filter((o) => o.status === 'needs_resolution');
+
+          // Atnaujiname serverio reviziją; jei dar liko nepriklausomų laukiančių operacijų, lokaliame vaizde jas pritaikome ant viršaus
+          persistSnapshotToLocalCache(
+            remainingSendable.length > 0
+              ? replayActiveOpsOverServerDb(serverDb, remainingSendable)
+              : serverDb,
+            true
+          );
+          // Išsaugome tikrą serverio reviziją atskirai (serverDb.revision)
+          serverRevision = nextRevision;
+          safeSetLocalStorage(STORAGE_KEYS.SERVER_REVISION, String(serverRevision));
+
           updateSyncState({
             revision: nextRevision,
             serverHasDb: true,
             lastSavedAt: new Date().toISOString(),
-            status: remaining.length > 0 ? 'saving' : 'saved',
-            errorMessage: undefined,
+            status:
+              remainingSendable.length > 0
+                ? 'saving'
+                : remainingBlocked.length > 0 || batchRejectionError || memoryRejectedOps.length > 0
+                ? 'error'
+                : 'saved',
+            errorMessage:
+              remainingSendable.length === 0 &&
+              remainingBlocked.length === 0 &&
+              !batchRejectionError &&
+              memoryRejectedOps.length === 0
+                ? undefined
+                : batchRejectionError || syncState.errorMessage,
           });
-          notifyDbListeners(serverDb);
+          notifyDbListeners(memoryDb || serverDb);
           continue;
         }
 
@@ -335,29 +506,87 @@ async function processMutationQueue(): Promise<{ ok: boolean; error?: string; co
             revision: serverRevision,
             serverHasDb: serverRevision > 0,
             errorMessage: msg,
-            pendingCount: ops.length,
+            pendingCount: sendableOps.length,
+            blockedCount: blockedOps.length,
           });
           return { ok: false, error: msg, conflict: true };
         }
 
         if (response.status === 400 || response.status === 413 || response.status === 404) {
-          // Nepertraukiama validacijos arba dydžio klaida – atmetame tik klaidingą operaciją, kad neblokuotų ateities darbų
+          // Pašaliname TIK atmestą operaciją, jos priklausomus veiksmus pažymime „needs_resolution“,
+          // o visus kitus nepriklausomus teisingus pakeitimus IŠSAUGOME ir tęsiame eilę!
           const errMsg =
             payload?.error ||
             (response.status === 413
               ? 'Užklausa arba nuotrauka viršija serverio dydžio limitą.'
               : 'Serveris atmetė neteisingus duomenis.');
-          const remaining = getPendingOps().slice(1);
-          setPendingOps(remaining);
 
-          // Atstatome autoritetingą serverio būseną, jei tokia buvo
-          await StorageService.loadFromServer(true);
+          memoryRejectedOps = [
+            ...memoryRejectedOps,
+            {
+              clientOpId: head.clientOpId,
+              operation: head.operation,
+              errorMessage: errMsg,
+              statusCode: response.status,
+              rejectedAt: new Date().toISOString(),
+            },
+          ];
+
+          const fetchedServerDb = await fetchAuthoritativeServerDbSafely();
+          const refDb = fetchedServerDb || memoryDb || StorageService.getCurrentDatabaseSnapshot();
+          const blockedKeys = new Set<string>(getTouchedEntityKeys(refDb, head.operation));
+
+          const remainingAfterReject = getPendingOps()
+            .filter((op) => op.clientOpId !== head.clientOpId)
+            .map((op) => {
+              if (op.status === 'needs_resolution') {
+                for (const k of getTouchedEntityKeys(refDb, op.operation)) {
+                  blockedKeys.add(k);
+                }
+                return op;
+              }
+              const refs = getOperationReferencedKeys(refDb, op.operation);
+              const isDependent = refs.some((k) => blockedKeys.has(k));
+              if (isDependent) {
+                for (const k of getTouchedEntityKeys(refDb, op.operation)) {
+                  blockedKeys.add(k);
+                }
+                return {
+                  ...op,
+                  status: 'needs_resolution' as const,
+                  blockedByOpId: head.clientOpId,
+                  blockedReason: `Priklauso nuo atmestos operacijos: ${errMsg}`,
+                };
+              }
+              return op;
+            });
+
+          setPendingOps(remainingAfterReject);
+
+          const nextSendable = remainingAfterReject.filter((o) => o.status !== 'needs_resolution');
+          const nextBlocked = remainingAfterReject.filter((o) => o.status === 'needs_resolution');
+
+          if (fetchedServerDb) {
+            const reconstructed = replayActiveOpsOverServerDb(fetchedServerDb, nextSendable);
+            persistSnapshotToLocalCache(reconstructed, true);
+            notifyDbListeners(reconstructed);
+          }
+
+          batchRejectionError =
+            nextBlocked.length > 0
+              ? `${errMsg} Priklausomi pakeitimai (${nextBlocked.length}) išsaugoti ir pažymėti kaip reikalaujantys sprendimo.`
+              : errMsg;
+
           updateSyncState({
-            status: 'error',
-            errorMessage: errMsg,
-            pendingCount: remaining.length,
+            status: nextSendable.length > 0 ? 'saving' : 'error',
+            errorMessage: batchRejectionError,
+            pendingCount: nextSendable.length,
+            blockedCount: nextBlocked.length,
+            blockedOps: nextBlocked.length > 0 ? nextBlocked : undefined,
+            rejectedOps: [...memoryRejectedOps],
           });
-          return { ok: false, error: errMsg };
+          // Tęsiame ciklą, kad nepriklausomi teisingi pakeitimai būtų išsiųsti į serverį!
+          continue;
         }
 
         // Serverio klaida (500/502/503) – neištriname pakeitimų iš eilės!
@@ -367,7 +596,8 @@ async function processMutationQueue(): Promise<{ ok: boolean; error?: string; co
         updateSyncState({
           status: 'error',
           errorMessage: serverErr,
-          pendingCount: ops.length,
+          pendingCount: sendableOps.length,
+          blockedCount: blockedOps.length,
         });
         return { ok: false, error: serverErr };
       }
@@ -418,7 +648,7 @@ export const StorageService = {
 
   getDepartments(): Department[] {
     if (memoryDb) return memoryDb.departments;
-    const raw = localStorage.getItem(STORAGE_KEYS.DEPARTMENTS);
+    const raw = safeGetLocalStorage(STORAGE_KEYS.DEPARTMENTS);
     if (!raw) return INITIAL_DEPARTMENTS;
     try {
       return JSON.parse(raw);
@@ -429,7 +659,7 @@ export const StorageService = {
 
   getRooms(): Room[] {
     if (memoryDb) return memoryDb.rooms;
-    const raw = localStorage.getItem(STORAGE_KEYS.ROOMS);
+    const raw = safeGetLocalStorage(STORAGE_KEYS.ROOMS);
     if (!raw) return INITIAL_ROOMS;
     try {
       return JSON.parse(raw);
@@ -440,7 +670,7 @@ export const StorageService = {
 
   getUsers(): User[] {
     if (memoryDb) return memoryDb.users;
-    const raw = localStorage.getItem(STORAGE_KEYS.USERS);
+    const raw = safeGetLocalStorage(STORAGE_KEYS.USERS);
     if (!raw) return INITIAL_USERS;
     try {
       return JSON.parse(raw);
@@ -451,7 +681,7 @@ export const StorageService = {
 
   getItems(): InventoryItem[] {
     if (memoryDb) return memoryDb.items;
-    const raw = localStorage.getItem(STORAGE_KEYS.ITEMS);
+    const raw = safeGetLocalStorage(STORAGE_KEYS.ITEMS);
     let items: InventoryItem[] = INITIAL_ITEMS;
     if (raw) {
       try {
@@ -499,7 +729,7 @@ export const StorageService = {
 
   getMovements(): MovementRecord[] {
     if (memoryDb) return memoryDb.movements;
-    const raw = localStorage.getItem(STORAGE_KEYS.MOVEMENTS);
+    const raw = safeGetLocalStorage(STORAGE_KEYS.MOVEMENTS);
     if (!raw) return INITIAL_MOVEMENTS;
     try {
       return JSON.parse(raw);
@@ -510,7 +740,7 @@ export const StorageService = {
 
   getWriteOffActs(): WriteOffAct[] {
     if (memoryDb) return memoryDb.writeOffActs;
-    const raw = localStorage.getItem(STORAGE_KEYS.WRITEOFFS);
+    const raw = safeGetLocalStorage(STORAGE_KEYS.WRITEOFFS);
     if (!raw) return INITIAL_WRITEOFF_ACTS;
     try {
       return JSON.parse(raw);
@@ -521,7 +751,7 @@ export const StorageService = {
 
   getAuditSessions(): AuditSession[] {
     if (memoryDb) return memoryDb.auditSessions;
-    const raw = localStorage.getItem(STORAGE_KEYS.AUDIT_SESSIONS);
+    const raw = safeGetLocalStorage(STORAGE_KEYS.AUDIT_SESSIONS);
     if (!raw) return [INITIAL_AUDIT_SESSION];
     try {
       return JSON.parse(raw);
@@ -531,7 +761,7 @@ export const StorageService = {
   },
 
   getActiveUserId(): string | null {
-    return localStorage.getItem(STORAGE_KEYS.ACTIVE_USER_ID);
+    return safeGetLocalStorage(STORAGE_KEYS.ACTIVE_USER_ID);
   },
 
   setActiveUserId(id: string) {
@@ -539,18 +769,22 @@ export const StorageService = {
   },
 
   clearActiveUserId() {
-    localStorage.removeItem(STORAGE_KEYS.ACTIVE_USER_ID);
+    safeRemoveLocalStorage(STORAGE_KEYS.ACTIVE_USER_ID);
   },
 
   getAuthSettings(): AuthSettings {
     if (memoryDb?.authSettings) return memoryDb.authSettings;
-    const raw = localStorage.getItem(STORAGE_KEYS.AUTH_SETTINGS);
+    const raw = safeGetLocalStorage(STORAGE_KEYS.AUTH_SETTINGS);
     if (!raw) return INITIAL_AUTH_SETTINGS;
     try {
       return JSON.parse(raw);
     } catch {
       return INITIAL_AUTH_SETTINGS;
     }
+  },
+
+  getPendingOperationsSnapshot(): PendingOp[] {
+    return getPendingOps();
   },
 
   /**
@@ -564,7 +798,9 @@ export const StorageService = {
     }
 
     if (discardPendingOps) {
+      memoryRejectedOps = [];
       setPendingOps([]);
+      updateSyncState({ rejectedOps: undefined, errorMessage: undefined });
     }
 
     updateSyncState({ status: 'loading', errorMessage: undefined });
@@ -604,10 +840,14 @@ export const StorageService = {
       }
 
       const pending = getPendingOps();
-      if (pending.length > 0 && !discardPendingOps) {
-        // Turime neišsiųstų neprisijungus atliktų pakeitimų – neištriname jų, o bandome nuosekliai išsiųsti!
-        serverRevision = validation.data.revision || 1;
+      const sendablePending = pending.filter((o) => o.status !== 'needs_resolution');
+      if (sendablePending.length > 0 && !discardPendingOps) {
+        // Turime neišsiųstų pakeitimų – išsaugome kiekvieno originalų baseRevision ir vykdome nuosekliai!
+        const srvRev = validation.data.revision || 1;
+        serverRevision = srvRev;
         safeSetLocalStorage(STORAGE_KEYS.SERVER_REVISION, String(serverRevision));
+        const reconstructed = replayActiveOpsOverServerDb(validation.data, sendablePending);
+        persistSnapshotToLocalCache(reconstructed, false);
         updateSyncState({
           revision: serverRevision,
           serverHasDb: true,
@@ -617,12 +857,16 @@ export const StorageService = {
       }
 
       persistSnapshotToLocalCache(validation.data, true);
+      const blocked = pending.filter((o) => o.status === 'needs_resolution');
       updateSyncState({
-        status: 'saved',
+        status: blocked.length > 0 || memoryRejectedOps.length > 0 ? 'error' : 'saved',
         revision: validation.data.revision || 1,
         serverHasDb: true,
         lastSavedAt: new Date().toISOString(),
-        errorMessage: undefined,
+        errorMessage:
+          blocked.length > 0
+            ? `Yra ${blocked.length} sprendimo reikalaujančių operacijų nuo ankstesnės klaidos.`
+            : undefined,
       });
       notifyDbListeners(validation.data);
       return true;
@@ -675,17 +919,26 @@ export const StorageService = {
     persistSnapshotToLocalCache(applied.database, false);
     notifyDbListeners(applied.database);
 
-    const pending = getPendingOps();
-    const lastQueuedBaseRev =
-      pending.length > 0 ? pending[pending.length - 1].baseRevision : serverRevision;
+    const existingOps = getPendingOps();
+    const newTouched = new Set(getTouchedEntityKeys(current, operation));
+    const precedingClientOpIds = existingOps
+      .filter(
+        (p) =>
+          p.status !== 'needs_resolution' &&
+          getTouchedEntityKeys(current, p.operation).some((k) => newTouched.has(k))
+      )
+      .map((p) => p.clientOpId);
 
+    // Kiekviena nauja operacija fiksuoja tikrą šiuo metu žinomą serverio reviziją!
     const nextPending: PendingOp[] = [
-      ...pending,
+      ...existingOps,
       {
         clientOpId: createOpId(),
-        baseRevision: lastQueuedBaseRev,
+        baseRevision: serverRevision,
         operation,
         createdAt: new Date().toISOString(),
+        ...(precedingClientOpIds.length > 0 ? { precedingClientOpIds } : {}),
+        status: 'pending',
       },
     ];
     setPendingOps(nextPending);
@@ -698,8 +951,67 @@ export const StorageService = {
     return processMutationQueue();
   },
 
+  async retryBlockedOperation(
+    clientOpId: string
+  ): Promise<{ ok: boolean; error?: string; conflict?: boolean }> {
+    const nextOps = getPendingOps().map((op) =>
+      op.clientOpId === clientOpId
+        ? {
+            ...op,
+            status: 'pending' as const,
+            blockedReason: undefined,
+            blockedByOpId: undefined,
+          }
+        : op
+    );
+    setPendingOps(nextOps);
+    return processMutationQueue();
+  },
+
+  dismissBlockedOperation(clientOpId: string): void {
+    const nextOps = getPendingOps().filter((op) => op.clientOpId !== clientOpId);
+    setPendingOps(nextOps);
+    const remainingBlocked = nextOps.filter((o) => o.status === 'needs_resolution');
+    const remainingSendable = nextOps.filter((o) => o.status !== 'needs_resolution');
+    if (remainingBlocked.length === 0 && remainingSendable.length === 0 && memoryRejectedOps.length === 0) {
+      updateSyncState({
+        status: syncState.serverHasDb ? 'saved' : syncState.status,
+        errorMessage: undefined,
+      });
+    }
+  },
+
+  clearRejectedOps(): void {
+    memoryRejectedOps = [];
+    const remaining = getPendingOps();
+    const remainingBlocked = remaining.filter((o) => o.status === 'needs_resolution');
+    const remainingSendable = remaining.filter((o) => o.status !== 'needs_resolution');
+    updateSyncState({
+      rejectedOps: undefined,
+      errorMessage:
+        remainingBlocked.length > 0
+          ? `Yra ${remainingBlocked.length} sprendimo reikalaujančių operacijų.`
+          : undefined,
+      status:
+        remainingBlocked.length === 0 && remainingSendable.length === 0 && syncState.serverHasDb
+          ? 'saved'
+          : syncState.status,
+    });
+  },
+
   async resolveConflictByReloadingServer(): Promise<boolean> {
     return this.loadFromServer(true);
+  },
+
+  resetForTests(): void {
+    activeQueuePromise = null;
+    memoryDb = null;
+    serverRevision = readInitialServerRevision();
+    memoryPendingOps = readPendingOpsFromStorage();
+    memoryRejectedOps = [];
+    queueStorageWarning = undefined;
+    cacheStorageWarning = undefined;
+    syncState = buildInitialSyncState();
   },
 
   /**
@@ -781,7 +1093,9 @@ export const StorageService = {
    */
   async importFullBackup(
     jsonContent: string
-  ): Promise<{ ok: true; migrated: boolean; backupFile?: string } | { ok: false; error: string }> {
+  ): Promise<
+    { ok: true; migrated: boolean; backupFile?: string; warnings?: string[] } | { ok: false; error: string }
+  > {
     let parsed: unknown;
     try {
       parsed = JSON.parse(jsonContent);
@@ -803,7 +1117,11 @@ export const StorageService = {
     if (syncState.localPreviewMode) {
       persistSnapshotToLocalCache(validation.data, false);
       notifyDbListeners(validation.data);
-      return { ok: true, migrated: validation.migrated };
+      return {
+        ok: true,
+        migrated: validation.migrated,
+        warnings: validation.warnings,
+      };
     }
 
     updateSyncState({ status: 'saving', errorMessage: undefined });
@@ -855,6 +1173,7 @@ export const StorageService = {
         ok: true,
         migrated: Boolean(payload.migrated || validation.migrated),
         backupFile: payload.backupFile,
+        warnings: Array.isArray(payload.warnings) ? payload.warnings : validation.warnings,
       };
     } catch {
       const msg =
@@ -884,7 +1203,7 @@ export const StorageService = {
    * Išjungia vietinę peržiūrą ir grįžta prie pagrindinių serverio duomenų.
    */
   async exitLocalDemoPreview(): Promise<boolean> {
-    localStorage.removeItem(STORAGE_KEYS.LOCAL_PREVIEW);
+    safeRemoveLocalStorage(STORAGE_KEYS.LOCAL_PREVIEW);
     memoryDb = null;
     updateSyncState({ localPreviewMode: false });
     return this.loadFromServer(true);
@@ -925,7 +1244,7 @@ export const StorageService = {
         return { ok: false, error: errMsg };
       }
 
-      localStorage.removeItem(STORAGE_KEYS.LOCAL_PREVIEW);
+      safeRemoveLocalStorage(STORAGE_KEYS.LOCAL_PREVIEW);
       setPendingOps([]);
       const nextDb = payload.database as AppDatabase;
       persistSnapshotToLocalCache(nextDb, true);

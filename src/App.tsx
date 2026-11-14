@@ -37,6 +37,35 @@ import {
 } from './types/inventory';
 import { StorageService, SyncState, DbMutation } from './utils/storage';
 
+function describePendingMutation(op: DbMutation): string {
+  switch (op.type) {
+    case 'SAVE_ITEM':
+      return `Turto įrašas „${op.item.name}“ (${op.item.inventoryNumber || op.item.id})`;
+    case 'DELETE_ITEM':
+      return `Turto šalinimas (${op.itemId})`;
+    case 'TRANSFER_ITEM':
+      return `Turto perkėlimas „${op.record.itemName}“`;
+    case 'CONFIRM_WRITEOFF':
+      return `Nurašymo pateikimas (${op.itemId})`;
+    case 'APPROVE_WRITEOFF_ACT':
+      return `Nurašymo akto tvirtinimas (${op.actId})`;
+    case 'REJECT_WRITEOFF':
+      return `Nurašymo atmetimas (${op.itemId})`;
+    case 'RESTORE_FROM_ARCHIVE':
+      return `Turto atkūrimas iš archyvo (${op.itemId})`;
+    case 'SAVE_FAULT_REPORT':
+      return `Gedimo pranešimas (${op.itemId})`;
+    case 'SAVE_DEPARTMENT':
+      return `Skyrius „${op.department.name}“`;
+    case 'SAVE_ROOM':
+      return `Kabinetas „${op.room.name}“`;
+    case 'SAVE_USER':
+      return `Naudotojas „${op.user.fullName}“`;
+    default:
+      return `Operacija ${op.type}`;
+  }
+}
+
 export default function App() {
   // Application Data States
   const [departments, setDepartments] = useState<Department[]>(() => StorageService.getDepartments());
@@ -127,6 +156,18 @@ export default function App() {
       unsubDb();
     };
   }, [refreshFromStorage]);
+
+  useEffect(() => {
+    if (!syncState.memoryOnlyQueue) return;
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [syncState.memoryOnlyQueue]);
 
   const runMutation = useCallback(async (op: DbMutation) => {
     setActionError(null);
@@ -280,19 +321,26 @@ export default function App() {
     void runMutation({ type: 'TRANSFER_ITEM', record });
   };
 
-  // Write-off Handler (atomically updates item and creates draft act)
-  const handleConfirmWriteOff = (item: InventoryItem, reasonCategory: string, notes: string) => {
+  // Write-off Handler (atomically updates item and creates/appends draft act; server assigns unique NUR-YYYY-NNN)
+  const handleConfirmWriteOff = (
+    item: InventoryItem,
+    reasonCategory: string,
+    notes: string,
+    targetActId?: string
+  ) => {
     const currentYear = new Date().getFullYear();
-    const actNumber = `NUR-${currentYear}-${Math.floor(10 + Math.random() * 90)}`;
     const newAct: WriteOffAct = {
-      id: `act-${Date.now()}`,
-      actNumber,
+      id: targetActId || `act-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      actNumber: '',
       date: new Date().toISOString().slice(0, 10),
+      actYear: currentYear,
       status: 'draft',
-      committeeChair: 'Kęstutis Labanauskas (Ūkio dalies vedėjas / IT)',
-      committeeMembers: [
-        'Sigita Navickienė (Direktoriaus pavaduotoja)',
-      ],
+      committeeChair:
+        activeAuditSession?.committeeChairman || 'Kęstutis Labanauskas (Ūkio dalies vedėjas / IT)',
+      committeeMembers:
+        activeAuditSession?.committeeMembers && activeAuditSession.committeeMembers.length > 0
+          ? activeAuditSession.committeeMembers
+          : ['Sigita Navickienė (Direktoriaus pavaduotoja)'],
       reasonCategory,
       notes,
       items: [
@@ -313,6 +361,7 @@ export default function App() {
       reasonCategory,
       notes,
       act: newAct,
+      ...(targetActId ? { targetActId } : {}),
     });
   };
 
@@ -380,13 +429,13 @@ export default function App() {
     void runMutation({ type: 'ARCHIVE_ROOM', roomId, isArchived });
   };
 
-  // Approve single item write-off -> Moves item to 'written_off' archive with chosen year
+  // Approve single item write-off (server delegates to whole-act approval and blocks partial approval)
   const handleApproveItemWriteOff = (
     item: InventoryItem,
     approvalYear: number = new Date().getFullYear(),
     customActNumber?: string
   ) => {
-    const actNum = customActNumber || item.writeOffActNumber || `NUR-${approvalYear}-${Math.floor(10 + Math.random() * 90)}`;
+    const actNum = customActNumber?.trim() || item.writeOffActNumber || '';
     const today = new Date().toISOString().slice(0, 10);
     void runMutation({
       type: 'APPROVE_ITEM_WRITEOFF',
@@ -398,21 +447,26 @@ export default function App() {
     });
   };
 
-  // Reject / Revert item pending write-off back to active
-  const handleRejectWriteOff = (itemId: string) => {
-    void runMutation({ type: 'REJECT_WRITEOFF', itemId });
+  // Reject / Revert item pending write-off back to active and preserve rejection history
+  const handleRejectWriteOff = (itemId: string, reason?: string) => {
+    void runMutation({
+      type: 'REJECT_WRITEOFF',
+      itemId,
+      ...(reason ? { reason } : {}),
+      rejectedByUserId: currentUser?.id,
+      rejectedByUserName: currentUser?.fullName,
+    });
   };
 
-  // Restore archived written-off item back to active inventory
-  const handleRestoreFromArchive = (itemId: string) => {
-    setPendingConfirmAction({
-      title: 'Atkurti turtą iš archyvo?',
-      message: 'Ar tikrai norite atkurti šį nurašytą turtą atgal į aktyvios apskaitos registrą?',
-      confirmLabel: 'Atkurti į apskaitą',
-      onConfirm: () => {
-        setPendingConfirmAction(null);
-        void runMutation({ type: 'RESTORE_FROM_ARCHIVE', itemId, noteAppend: '' });
-      },
+  // Restore archived written-off item back to active inventory with explicit condition & reason
+  const handleRestoreFromArchive = (itemId: string, condition: ItemCondition, reason: string) => {
+    void runMutation({
+      type: 'RESTORE_FROM_ARCHIVE',
+      itemId,
+      condition,
+      reason,
+      restoredByUserId: currentUser?.id,
+      restoredByUserName: currentUser?.fullName,
     });
   };
 
@@ -430,14 +484,35 @@ export default function App() {
     });
   };
 
-  // Approve entire write-off act from ReportsView
-  const handleApproveWriteOffAct = (actId: string, approvalYear: number = new Date().getFullYear()) => {
+  // Approve entire write-off act atomically
+  const handleApproveWriteOffAct = (
+    actId: string,
+    approvalYear: number = new Date().getFullYear(),
+    customActNumber?: string
+  ) => {
     const today = new Date().toISOString().slice(0, 10);
     void runMutation({
       type: 'APPROVE_WRITEOFF_ACT',
       actId,
       approvalYear,
       approvedDate: today,
+      ...(customActNumber?.trim() ? { actNumber: customActNumber.trim() } : {}),
+      approvedByUserId: currentUser?.id,
+      approvedByUserName: currentUser?.fullName,
+    });
+  };
+
+  // Reconcile write-off integrity mismatches cleanly without inventing historical data
+  const handleReconcileWriteOffIssue = (
+    action: 'return_to_active' | 'remove_stale_draft_item' | 'link_by_existing_act_number',
+    itemId?: string,
+    actId?: string
+  ) => {
+    void runMutation({
+      type: 'RECONCILE_WRITEOFF_ISSUE',
+      action,
+      ...(itemId ? { itemId } : {}),
+      ...(actId ? { actId } : {}),
     });
   };
 
@@ -552,8 +627,16 @@ export default function App() {
         {/* View Content Viewport */}
         <main className="flex-1 overflow-y-auto p-6 md:p-8 bg-slate-100/90">
           <div className="max-w-7xl mx-auto">
-            {/* Sync / Conflict / Error / Local Preview Alert Banners */}
-            {(actionError || syncState.status === 'error' || syncState.status === 'conflict' || syncState.localPreviewMode || syncState.storageWarning || syncState.status === 'uninitialized') && (
+            {/* Sync / Conflict / Error / Local Preview / Blocked Ops Alert Banners */}
+            {(actionError ||
+              syncState.status === 'error' ||
+              syncState.status === 'conflict' ||
+              syncState.localPreviewMode ||
+              syncState.storageWarning ||
+              syncState.memoryOnlyQueue ||
+              syncState.blockedCount > 0 ||
+              (syncState.rejectedOps && syncState.rejectedOps.length > 0) ||
+              syncState.status === 'uninitialized') && (
               <div className="mb-4 space-y-2 no-print">
                 {syncState.localPreviewMode && (
                   <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 rounded-lg bg-amber-50 border border-amber-300 text-xs text-amber-950">
@@ -631,6 +714,78 @@ export default function App() {
                   </div>
                 )}
 
+                {syncState.rejectedOps && syncState.rejectedOps.length > 0 && (
+                  <div className="px-4 py-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-950 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="font-bold flex items-center gap-1.5">
+                        <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                        <span>Atmesti pakeitimai ({syncState.rejectedOps.length})</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => StorageService.clearRejectedOps()}
+                        className="px-2 py-0.5 rounded bg-rose-100 hover:bg-rose-200 text-rose-900 font-semibold cursor-pointer"
+                      >
+                        Išvalyti pranešimą
+                      </button>
+                    </div>
+                    <ul className="space-y-1 pl-5 list-disc text-[11px]">
+                      {syncState.rejectedOps.map((rej) => (
+                        <li key={rej.clientOpId}>
+                          <strong>{describePendingMutation(rej.operation)}:</strong> {rej.errorMessage} (HTTP {rej.statusCode})
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {syncState.blockedOps && syncState.blockedOps.length > 0 && (
+                  <div className="px-4 py-2.5 rounded-lg bg-amber-50 border border-amber-300 text-xs text-amber-950 space-y-2">
+                    <div className="font-bold flex items-center gap-1.5">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                      <span>
+                        Pakeitimai, reikalaujantys sprendimo ({syncState.blockedOps.length}):
+                      </span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {syncState.blockedOps.map((blocked) => (
+                        <div
+                          key={blocked.clientOpId}
+                          className="flex flex-wrap items-center justify-between gap-2 bg-white/80 border border-amber-200 rounded-md px-3 py-2 text-[11px]"
+                        >
+                          <div>
+                            <div className="font-semibold text-slate-900">
+                              {describePendingMutation(blocked.operation)}
+                            </div>
+                            <div className="text-amber-800">
+                              {blocked.blockedReason || 'Priklauso nuo anksčiau atmestos operacijos.'}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActionError(null);
+                                void StorageService.retryBlockedOperation(blocked.clientOpId);
+                              }}
+                              className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white font-bold cursor-pointer"
+                            >
+                              Bandyti dar kartą
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => StorageService.dismissBlockedOperation(blocked.clientOpId)}
+                              className="px-2.5 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold cursor-pointer"
+                            >
+                              Atsisakyti
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {syncState.status === 'uninitialized' && !syncState.localPreviewMode && (
                   <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-900">
                     <div className="flex items-center gap-2">
@@ -640,10 +795,13 @@ export default function App() {
                   </div>
                 )}
 
-                {syncState.storageWarning && (
-                  <div className="flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-50 border border-amber-200 text-[11px] text-amber-900">
+                {(syncState.memoryOnlyQueue || syncState.storageWarning) && (
+                  <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-amber-50 border border-amber-300 text-xs text-amber-950 font-medium">
                     <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                    <span>{syncState.storageWarning}</span>
+                    <span>
+                      {syncState.storageWarning ||
+                        'Pakeitimai laikomi tik darbinėje atmintyje – uždarius arba perkrovus puslapį prieš išsaugant serveryje, jie bus prarasti.'}
+                    </span>
                   </div>
                 )}
               </div>
@@ -688,6 +846,7 @@ export default function App() {
                 departments={departments}
                 rooms={rooms}
                 users={users}
+                writeOffActs={writeOffActs}
                 currentUser={currentUser}
                 onEditItem={(item) => {
                   setEditingItem(item);
@@ -708,9 +867,11 @@ export default function App() {
                 }}
                 onPrintSpecificLabels={handlePrintSpecificLabels}
                 onApproveWriteOff={handleApproveItemWriteOff}
+                onApproveWriteOffAct={handleApproveWriteOffAct}
                 onRejectWriteOff={handleRejectWriteOff}
                 onRestoreFromArchive={handleRestoreFromArchive}
                 onPermanentDelete={handlePermanentDelete}
+                onReconcileWriteOffIssue={handleReconcileWriteOffIssue}
               />
             )}
 
@@ -783,6 +944,7 @@ export default function App() {
                 onExportCSV={handleExportCSV}
                 onSaveWriteOffAct={handleSaveWriteOffAct}
                 onApproveWriteOffAct={handleApproveWriteOffAct}
+                onReconcileWriteOffIssue={handleReconcileWriteOffIssue}
               />
             )}
 
@@ -908,6 +1070,7 @@ export default function App() {
           isOpen={isWriteOffModalOpen}
           onClose={() => setIsWriteOffModalOpen(false)}
           item={writeOffTargetItem}
+          writeOffActs={writeOffActs}
           onConfirmWriteOff={handleConfirmWriteOff}
         />
       )}

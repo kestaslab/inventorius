@@ -154,6 +154,30 @@ export interface DefectReport {
   resolutionNotes?: string;
 }
 
+export interface WriteOffHistoryEntry {
+  id: string;
+  actId?: string;
+  actNumber?: string;
+  writtenOffDate?: string;
+  writtenOffYear?: number;
+  writeOffReason?: string;
+  restoredAt?: string;
+  restoredByUserId?: string;
+  restoredByUserName?: string;
+  restorationReason?: string;
+  conditionOnRestore?: ItemCondition;
+}
+
+export interface WriteOffRejectionEntry {
+  id: string;
+  actId: string;
+  actNumber: string;
+  rejectedAt: string;
+  rejectedByUserId?: string;
+  rejectedByUserName?: string;
+  reason: string;
+}
+
 export interface InventoryItem {
   id: string;
   inventoryNumber: string; // e.g. TM-2023-0042
@@ -180,6 +204,8 @@ export interface InventoryItem {
   writeOffActNumber?: string; // pvz., NUR-2025-01
   writeOffReason?: string;
   writeOffActId?: string;
+  writeOffHistory?: WriteOffHistoryEntry[]; // Ankstesnių nurašymų ir jų atkūrimo istorija
+  writeOffRejectionHistory?: WriteOffRejectionEntry[]; // Atmesti nurašymo teikimai
   defectReports?: DefectReport[]; // Gedimų pranešimų istorija
   activeDefectNote?: string; // Aktyvaus gedimo santrauka
 }
@@ -215,18 +241,34 @@ export interface WriteOffActItem {
   reason: string;
 }
 
+export interface WriteOffRejectedItemRecord {
+  itemId: string;
+  name: string;
+  inventoryNumber: string;
+  price: number;
+  residualPrice?: number;
+  submissionReason?: string;
+  rejectedAt: string;
+  rejectedByUserId?: string;
+  rejectedByUserName?: string;
+  rejectionReason: string;
+}
+
 export interface WriteOffAct {
   id: string;
-  actNumber: string; // e.g. NUR-2026-04
+  actNumber: string; // e.g. NUR-2026-004
   date: string;
   actYear?: number; // Metai archyvavimui (pvz. 2020, 2025, 2026)
-  status: 'draft' | 'approved';
+  status: 'draft' | 'approved' | 'cancelled';
   committeeChair: string;
   committeeMembers: string[];
   reasonCategory: string; // 'Fizinis nusidėvėjimas' | 'Moralinis pasenimas' | 'Gedimas (neremontuotinas)'
   items: WriteOffActItem[];
+  rejectedItems?: WriteOffRejectedItemRecord[];
   notes?: string;
   approvedDate?: string;
+  approvedByUserId?: string;
+  approvedByUserName?: string;
 }
 
 export interface TransferAct {

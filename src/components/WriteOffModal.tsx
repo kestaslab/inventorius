@@ -1,28 +1,56 @@
-import React, { useState } from 'react';
-import { X, Trash2, AlertTriangle } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, Trash2, AlertTriangle, FileText } from 'lucide-react';
 import { InventoryItem, WriteOffAct } from '../types/inventory';
 
 interface WriteOffModalProps {
   isOpen: boolean;
   onClose: () => void;
   item: InventoryItem | null;
-  onConfirmWriteOff: (item: InventoryItem, reasonCategory: string, notes: string) => void;
+  writeOffActs?: WriteOffAct[];
+  onConfirmWriteOff: (
+    item: InventoryItem,
+    reasonCategory: string,
+    notes: string,
+    targetActId?: string
+  ) => void;
 }
 
 export const WriteOffModal: React.FC<WriteOffModalProps> = ({
   isOpen,
   onClose,
   item,
+  writeOffActs = [],
   onConfirmWriteOff,
 }) => {
-  const [reasonCategory, setReasonCategory] = useState<string>('Fizinis susidėvėjimas (sugedęs ir neremontuotinas)');
+  const [reasonCategory, setReasonCategory] = useState<string>(
+    'Fizinis susidėvėjimas (sugedęs ir neremontuotinas)'
+  );
   const [defectNotes, setDefectNotes] = useState<string>('');
+  const [selectedDraftActId, setSelectedDraftActId] = useState<string>('');
+
+  const draftActs = writeOffActs.filter((a) => a.status === 'draft');
+
+  useEffect(() => {
+    if (isOpen) {
+      setDefectNotes('');
+      setSelectedDraftActId('');
+    }
+  }, [isOpen, item?.id]);
 
   if (!isOpen || !item) return null;
 
+  const existingActiveDraft = draftActs.find((a) =>
+    a.items.some((ai) => ai.itemId === item.id)
+  );
+  const isAlreadyBlocked =
+    item.status === 'to_writeoff' ||
+    item.status === 'written_off' ||
+    Boolean(existingActiveDraft);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onConfirmWriteOff(item, reasonCategory, defectNotes);
+    if (isAlreadyBlocked || !defectNotes.trim()) return;
+    onConfirmWriteOff(item, reasonCategory, defectNotes.trim(), selectedDraftActId || undefined);
     onClose();
   };
 
@@ -47,12 +75,25 @@ export const WriteOffModal: React.FC<WriteOffModalProps> = ({
 
         <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0 overflow-hidden">
           <div className="overflow-y-auto px-6 py-4 space-y-4 flex-1 overscroll-contain text-xs">
-            <div className="p-3 bg-amber-50 border border-amber-300 rounded-lg text-xs text-amber-900 flex items-start gap-2.5">
-              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-              <div className="font-medium">
-                Turtas bus perkeltas į būseną <strong>„Teikiamas nurašyti“</strong> ir įtrauktas į oficialų nurašymo aktą komisijos patvirtinimui.
+            {isAlreadyBlocked ? (
+              <div className="p-3 bg-rose-50 border border-rose-300 rounded-lg text-xs text-rose-900 flex items-start gap-2.5">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <div className="font-medium">
+                  {existingActiveDraft
+                    ? `Šis turtas jau yra įtrauktas į aktyvų nurašymo projektą „${existingActiveDraft.actNumber}“. Negalima pateikti į kelis projektus vienu metu.`
+                    : item.status === 'to_writeoff'
+                    ? 'Šis turtas jau pateiktas nurašymui.'
+                    : 'Šis turtas jau nurašytas archyve. Prieš pakartotinį nurašymą jį reikia atkurti iš archyvo.'}
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="p-3 bg-amber-50 border border-amber-300 rounded-lg text-xs text-amber-900 flex items-start gap-2.5">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div className="font-medium">
+                  Turtas bus perkeltas į būseną <strong>„Teikiamas nurašyti“</strong> ir įtrauktas į nurašymo akto projektą. Visi vieno akto daiktai vėliau tvirtinami kartu.
+                </div>
+              </div>
+            )}
 
             <div className="bg-slate-50 p-3 rounded-lg border border-slate-300 space-y-1">
               <div className="font-bold text-slate-900">
@@ -60,8 +101,32 @@ export const WriteOffModal: React.FC<WriteOffModalProps> = ({
               </div>
               <div className="text-slate-600 flex justify-between font-medium">
                 <span>Įsigijimo vertė: <strong>{item.purchasePrice.toFixed(2)} €</strong></span>
-                <span className="text-blue-700 font-semibold">{item.purchasePrice >= 750 ? 'IMT (≥750€)' : 'TMT (<750€)'}</span>
+                <span className="text-blue-700 font-semibold">
+                  {item.purchasePrice >= 750 ? 'IMT (≥750€)' : 'TMT (<750€)'}
+                </span>
               </div>
+            </div>
+
+            <div>
+              <label className="block text-slate-700 font-bold mb-1 flex items-center gap-1">
+                <FileText className="w-3.5 h-3.5 text-slate-500" />
+                <span>Nurašymo akto projektas *</span>
+              </label>
+              <select
+                value={selectedDraftActId}
+                onChange={(e) => setSelectedDraftActId(e.target.value)}
+                disabled={isAlreadyBlocked}
+                className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 font-medium text-slate-900 focus:ring-1 focus:ring-blue-500 shadow-2xs"
+              >
+                <option value="">
+                  + Sukurti naują nurašymo aktą (unikalus Nr. bus priskirtas serveryje)
+                </option>
+                {draftActs.map((act) => (
+                  <option key={act.id} value={act.id}>
+                    Pridėti prie esamo projekto: {act.actNumber} ({act.date} · {act.items.length} vnt.)
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div>
@@ -71,6 +136,7 @@ export const WriteOffModal: React.FC<WriteOffModalProps> = ({
               <select
                 value={reasonCategory}
                 onChange={(e) => setReasonCategory(e.target.value)}
+                disabled={isAlreadyBlocked}
                 className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 font-medium text-slate-900 focus:ring-1 focus:ring-blue-500 shadow-2xs"
               >
                 <option value="Fizinis susidėvėjimas (sugedęs ir neremontuotinas)">
@@ -95,6 +161,7 @@ export const WriteOffModal: React.FC<WriteOffModalProps> = ({
               <textarea
                 rows={3}
                 required
+                disabled={isAlreadyBlocked}
                 value={defectNotes}
                 onChange={(e) => setDefectNotes(e.target.value)}
                 placeholder="pvz., Pagrindinės plokštės perdegimas, remontas viršija naujo įrenginio vertę..."
@@ -113,7 +180,8 @@ export const WriteOffModal: React.FC<WriteOffModalProps> = ({
             </button>
             <button
               type="submit"
-              className="px-4 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-md shadow-xs cursor-pointer transition-colors"
+              disabled={isAlreadyBlocked}
+              className="px-4 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-50 rounded-md shadow-xs cursor-pointer transition-colors"
             >
               Teikti nurašymui
             </button>

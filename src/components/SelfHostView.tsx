@@ -46,6 +46,7 @@ export const SelfHostView: React.FC<SelfHostViewProps> = ({
 }) => {
   const [copiedSection, setCopiedSection] = useState<string | null>(null);
   const [restoreMessage, setRestoreMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [restoreWarnings, setRestoreWarnings] = useState<string[]>([]);
   const [showResetConfirmModal, setShowResetConfirmModal] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
@@ -91,6 +92,7 @@ export const SelfHostView: React.FC<SelfHostViewProps> = ({
       const content = event.target?.result as string;
       setIsImporting(true);
       setRestoreMessage(null);
+      setRestoreWarnings([]);
       try {
         const result = await StorageService.importFullBackup(content);
         if (result.ok) {
@@ -100,6 +102,7 @@ export const SelfHostView: React.FC<SelfHostViewProps> = ({
             type: 'success',
             text: `Duomenų bazė sėkmingai atstatyta iš atsarginės kopijos!${extra}${bkp}`,
           });
+          setRestoreWarnings(result.warnings || []);
           onRefreshData();
         } else {
           setRestoreMessage({
@@ -376,6 +379,23 @@ chmod +x /opt/inventorius/update.sh
                   : 'bg-rose-50 text-rose-800 border border-rose-200'
               }`}>
                 {restoreMessage.text}
+              </div>
+            )}
+
+            {restoreWarnings.length > 0 && (
+              <div className="p-3 rounded-lg text-xs bg-amber-50 text-amber-950 border border-amber-300 space-y-1.5">
+                <div className="font-bold flex items-center gap-1.5 text-amber-900">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>Aptikti senos kopijos nurašymo aktų ir daiktų neatitikimai ({restoreWarnings.length}):</span>
+                </div>
+                <p className="text-[11px] text-amber-800">
+                  Istoriniai duomenys nebuvo išgalvoti ar tyliai pakeisti. Galite juos saugiai peržiūrėti ir sutvarkyti skiltyje „Inventoriaus sąrašas“ arba „Ataskaitos ir aktai“.
+                </p>
+                <ul className="list-disc pl-4 space-y-1 text-[11px] text-amber-900 max-h-40 overflow-y-auto">
+                  {restoreWarnings.map((w, idx) => (
+                    <li key={idx}>{w}</li>
+                  ))}
+                </ul>
               </div>
             )}
           </div>

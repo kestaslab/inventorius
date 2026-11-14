@@ -9,10 +9,18 @@ import {
   AuthSettings,
   DefectReport,
   ItemCondition,
+  WriteOffHistoryEntry,
+  WriteOffRejectionEntry,
+  WriteOffRejectedItemRecord,
   formatRoomName,
   getUserAssignedRoomIds,
 } from '../types/inventory';
 import { AppDatabase, CURRENT_DB_VERSION, isValidIsoDateString } from './databaseValidation';
+import {
+  findActiveDraftActForItem,
+  generateNextWriteOffActNumber,
+  isWriteOffActNumberUnique,
+} from './writeOffUtils';
 
 export type DbMutation =
   | { type: 'SAVE_ITEM'; item: InventoryItem }
@@ -24,6 +32,7 @@ export type DbMutation =
       reasonCategory: string;
       notes: string;
       act: WriteOffAct;
+      targetActId?: string;
     }
   | {
       type: 'APPROVE_ITEM_WRITEOFF';
@@ -33,14 +42,38 @@ export type DbMutation =
       approvedDate: string;
       fallbackNotes?: string;
     }
-  | { type: 'REJECT_WRITEOFF'; itemId: string }
-  | { type: 'RESTORE_FROM_ARCHIVE'; itemId: string; noteAppend: string }
+  | {
+      type: 'REJECT_WRITEOFF';
+      itemId: string;
+      reason?: string;
+      rejectedByUserId?: string;
+      rejectedByUserName?: string;
+    }
+  | {
+      type: 'RESTORE_FROM_ARCHIVE';
+      itemId: string;
+      condition?: ItemCondition;
+      reason?: string;
+      restoredByUserId?: string;
+      restoredByUserName?: string;
+      restoredAt?: string;
+      noteAppend?: string;
+    }
   | { type: 'SAVE_WRITEOFF_ACT'; act: WriteOffAct }
   | {
       type: 'APPROVE_WRITEOFF_ACT';
       actId: string;
       approvalYear: number;
       approvedDate: string;
+      actNumber?: string;
+      approvedByUserId?: string;
+      approvedByUserName?: string;
+    }
+  | {
+      type: 'RECONCILE_WRITEOFF_ISSUE';
+      action: 'return_to_active' | 'remove_stale_draft_item' | 'link_by_existing_act_number';
+      itemId?: string;
+      actId?: string;
     }
   | {
       type: 'SAVE_FAULT_REPORT';
@@ -83,24 +116,55 @@ export function getTouchedEntityKeys(db: AppDatabase, op: DbMutation): string[] 
       return [`item:${op.itemId}`];
     case 'TRANSFER_ITEM':
       return [`item:${op.record.itemId}`, `movement:${op.record.id}`];
-    case 'CONFIRM_WRITEOFF':
-      return [`item:${op.itemId}`, `act:${op.act.id}`];
+    case 'CONFIRM_WRITEOFF': {
+      const targetActId = op.targetActId || op.act.id;
+      const keys = [`item:${op.itemId}`, `act:${targetActId}`];
+      const customNum = op.act.actNumber?.trim();
+      if (customNum && customNum.toUpperCase() !== 'AUTO') {
+        keys.push(`act_number:${customNum.toUpperCase()}`);
+      }
+      return keys;
+    }
     case 'APPROVE_ITEM_WRITEOFF': {
       const actKeys = db.writeOffActs
         .filter((a) => a.items.some((ai) => ai.itemId === op.itemId))
         .map((a) => `act:${a.id}`);
-      return [`item:${op.itemId}`, ...actKeys];
+      const keys = [`item:${op.itemId}`, ...actKeys];
+      if (op.actNumber?.trim()) {
+        keys.push(`act_number:${op.actNumber.trim().toUpperCase()}`);
+      }
+      return keys;
     }
-    case 'REJECT_WRITEOFF':
-      return [`item:${op.itemId}`];
+    case 'REJECT_WRITEOFF': {
+      const draftActKeys = db.writeOffActs
+        .filter((a) => a.status === 'draft' && a.items.some((ai) => ai.itemId === op.itemId))
+        .map((a) => `act:${a.id}`);
+      return [`item:${op.itemId}`, ...draftActKeys];
+    }
     case 'RESTORE_FROM_ARCHIVE':
       return [`item:${op.itemId}`];
-    case 'SAVE_WRITEOFF_ACT':
-      return [`act:${op.act.id}`];
+    case 'SAVE_WRITEOFF_ACT': {
+      const keys = [`act:${op.act.id}`];
+      if (op.act.actNumber?.trim()) {
+        keys.push(`act_number:${op.act.actNumber.trim().toUpperCase()}`);
+      }
+      return keys;
+    }
     case 'APPROVE_WRITEOFF_ACT': {
       const act = db.writeOffActs.find((a) => a.id === op.actId);
       const itemKeys = act ? act.items.map((it) => `item:${it.itemId}`) : [];
-      return [`act:${op.actId}`, ...itemKeys];
+      const keys = [`act:${op.actId}`, ...itemKeys];
+      const finalNum = (op.actNumber ?? act?.actNumber)?.trim();
+      if (finalNum) {
+        keys.push(`act_number:${finalNum.toUpperCase()}`);
+      }
+      return keys;
+    }
+    case 'RECONCILE_WRITEOFF_ISSUE': {
+      const keys: string[] = [];
+      if (op.itemId) keys.push(`item:${op.itemId}`);
+      if (op.actId) keys.push(`act:${op.actId}`);
+      return keys;
     }
     case 'SAVE_FAULT_REPORT':
       return [`item:${op.itemId}`];
@@ -164,6 +228,82 @@ export function getTouchedEntityKeys(db: AppDatabase, op: DbMutation): string[] 
     case 'RELOCATE_AUDIT_ITEM':
       return [`item:${op.itemId}`];
   }
+}
+
+/**
+ * Grąžina visų objektų raktus, nuo kurių priklauso arba kuriuos nuskaito / susieja operacija
+ * (įskaitant pačius keičiamus objektus ir tėvinius skyrius, kabinetus, naudotojus ar aktus).
+ */
+export function getOperationReferencedKeys(db: AppDatabase, op: DbMutation): string[] {
+  const keys = new Set<string>(getTouchedEntityKeys(db, op));
+
+  switch (op.type) {
+    case 'SAVE_ITEM':
+      if (op.item.departmentId) keys.add(`department:${op.item.departmentId}`);
+      if (op.item.roomId) keys.add(`room:${op.item.roomId}`);
+      if (op.item.responsibleUserId) keys.add(`user:${op.item.responsibleUserId}`);
+      if (op.item.writeOffActId) keys.add(`act:${op.item.writeOffActId}`);
+      break;
+    case 'TRANSFER_ITEM':
+      if (op.record.fromDepartmentId) keys.add(`department:${op.record.fromDepartmentId}`);
+      if (op.record.toDepartmentId) keys.add(`department:${op.record.toDepartmentId}`);
+      if (op.record.fromRoomId) keys.add(`room:${op.record.fromRoomId}`);
+      if (op.record.toRoomId) keys.add(`room:${op.record.toRoomId}`);
+      if (op.record.fromUserId) keys.add(`user:${op.record.fromUserId}`);
+      if (op.record.toUserId) keys.add(`user:${op.record.toUserId}`);
+      break;
+    case 'CONFIRM_WRITEOFF':
+      keys.add(`item:${op.itemId}`);
+      keys.add(`act:${op.targetActId || op.act.id}`);
+      break;
+    case 'APPROVE_ITEM_WRITEOFF':
+    case 'REJECT_WRITEOFF':
+    case 'RESTORE_FROM_ARCHIVE':
+    case 'SAVE_FAULT_REPORT':
+    case 'DELETE_ITEM':
+      keys.add(`item:${op.itemId}`);
+      break;
+    case 'SAVE_WRITEOFF_ACT':
+      keys.add(`act:${op.act.id}`);
+      for (const ai of op.act.items || []) {
+        keys.add(`item:${ai.itemId}`);
+      }
+      break;
+    case 'APPROVE_WRITEOFF_ACT':
+      keys.add(`act:${op.actId}`);
+      break;
+    case 'RECONCILE_WRITEOFF_ISSUE':
+      if (op.itemId) keys.add(`item:${op.itemId}`);
+      if (op.actId) keys.add(`act:${op.actId}`);
+      break;
+    case 'SAVE_ROOM':
+      if (op.room.departmentId) keys.add(`department:${op.room.departmentId}`);
+      if (op.room.defaultResponsiblePersonId) {
+        keys.add(`user:${op.room.defaultResponsiblePersonId}`);
+      }
+      break;
+    case 'SAVE_DEPARTMENT':
+      if (op.department.managerId) keys.add(`user:${op.department.managerId}`);
+      break;
+    case 'TRANSFER_AND_DELETE_ROOM':
+      keys.add(`room:${op.roomId}`);
+      keys.add(`room:${op.targetRoomId}`);
+      break;
+    case 'TRANSFER_AND_DELETE_DEPARTMENT':
+      keys.add(`department:${op.departmentId}`);
+      keys.add(`department:${op.targetDepartmentId}`);
+      break;
+    case 'TRANSFER_AND_DELETE_USER':
+      keys.add(`user:${op.userId}`);
+      keys.add(`user:${op.targetUserId}`);
+      break;
+    case 'RELOCATE_AUDIT_ITEM':
+      keys.add(`item:${op.itemId}`);
+      keys.add(`room:${op.newRoomId}`);
+      break;
+  }
+
+  return Array.from(keys);
 }
 
 export type MutationApplyResult =
@@ -406,6 +546,9 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
             writeOffActNumber: op.item.writeOffActNumber ?? existing.writeOffActNumber,
             writeOffReason: op.item.writeOffReason ?? existing.writeOffReason,
             writeOffActId: op.item.writeOffActId ?? existing.writeOffActId,
+            writeOffHistory: op.item.writeOffHistory ?? existing.writeOffHistory,
+            writeOffRejectionHistory:
+              op.item.writeOffRejectionHistory ?? existing.writeOffRejectionHistory,
             barcode: op.item.barcode ?? existing.barcode,
             lastAuditDate: op.item.lastAuditDate ?? existing.lastAuditDate,
           }
@@ -533,17 +676,141 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
     }
 
     case 'CONFIRM_WRITEOFF': {
+      const targetItem = db.items.find((i) => i.id === op.itemId);
+      if (!targetItem) {
+        return { ok: false, statusCode: 404, error: 'Nurašymui teikiamas turtas nerastas.' };
+      }
+      if (targetItem.status === 'to_writeoff') {
+        return {
+          ok: false,
+          statusCode: 409,
+          error: `Turtas [${targetItem.inventoryNumber}] jau yra pateiktas nurašymui.`,
+        };
+      }
+      if (targetItem.status === 'written_off') {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: `Turtas [${targetItem.inventoryNumber}] jau yra nurašytas archyve. Prieš pakartotinį nurašymą jį reikia atkurti iš archyvo.`,
+        };
+      }
+      const existingActiveDraft = db.writeOffActs.find(
+        (a) => a.status === 'draft' && a.items.some((ai) => ai.itemId === op.itemId)
+      );
+      if (existingActiveDraft) {
+        return {
+          ok: false,
+          statusCode: 409,
+          error: `Turtas [${targetItem.inventoryNumber}] jau įtrauktas į aktyvų nurašymo projektą „${existingActiveDraft.actNumber}“. Negalima pateikti į kelis projektus vienu metu.`,
+        };
+      }
+      if (!op.reasonCategory?.trim() || !op.notes?.trim()) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'Nurodykite nurašymo priežasties kategoriją ir defekto aprašymą.',
+        };
+      }
+
+      const cleanReasonCategory = op.reasonCategory.trim();
+      const cleanNotes = op.notes.trim();
+      const entryItem = {
+        itemId: targetItem.id,
+        name: targetItem.name,
+        inventoryNumber: targetItem.inventoryNumber,
+        price: targetItem.purchasePrice,
+        residualPrice: targetItem.residualValue ?? 0,
+        reason: cleanNotes,
+      };
+
+      let targetAct: WriteOffAct;
+      let writeOffActs: WriteOffAct[];
+
+      if (op.targetActId) {
+        const existingDraft = db.writeOffActs.find((a) => a.id === op.targetActId);
+        if (!existingDraft) {
+          return {
+            ok: false,
+            statusCode: 404,
+            error: 'Pasirinktas nurašymo akto projektas nerastas.',
+          };
+        }
+        if (existingDraft.status !== 'draft') {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: `Negalima įtraukti turto į aktą „${existingDraft.actNumber}“, nes jo būsena yra „${existingDraft.status}“ (nebe projektas).`,
+          };
+        }
+        if (existingDraft.items.some((ai) => ai.itemId === targetItem.id)) {
+          return {
+            ok: false,
+            statusCode: 409,
+            error: `Turtas [${targetItem.inventoryNumber}] jau yra akte „${existingDraft.actNumber}“.`,
+          };
+        }
+        targetAct = {
+          ...existingDraft,
+          items: [...existingDraft.items, entryItem],
+          notes: existingDraft.notes
+            ? `${existingDraft.notes}\n[${targetItem.inventoryNumber}] ${cleanNotes}`
+            : cleanNotes,
+        };
+        writeOffActs = db.writeOffActs.map((a) => (a.id === targetAct.id ? targetAct : a));
+      } else {
+        if (db.writeOffActs.some((a) => a.id === op.act.id)) {
+          return { ok: false, statusCode: 409, error: 'Nurašymo aktas tokiu ID jau egzistuoja.' };
+        }
+        const actDate =
+          op.act.date && isValidIsoDateString(op.act.date) ? op.act.date : todayStr;
+        const year = op.act.actYear || Number(actDate.slice(0, 4)) || new Date().getFullYear();
+        const rawNumber = (op.act.actNumber || '').trim();
+        let assignedNumber: string;
+
+        if (!rawNumber || rawNumber.toUpperCase() === 'AUTO') {
+          assignedNumber = generateNextWriteOffActNumber(db.writeOffActs, year);
+        } else {
+          if (!isWriteOffActNumberUnique(db.writeOffActs, rawNumber)) {
+            return {
+              ok: false,
+              statusCode: 409,
+              error: `Nurašymo akto numeris „${rawNumber}“ jau naudojamas kitame akte.`,
+            };
+          }
+          assignedNumber = rawNumber;
+        }
+
+        targetAct = {
+          ...op.act,
+          actNumber: assignedNumber,
+          date: actDate,
+          actYear: year,
+          status: 'draft',
+          reasonCategory: cleanReasonCategory,
+          notes: cleanNotes,
+          items: [entryItem],
+        };
+        writeOffActs = [targetAct, ...db.writeOffActs];
+      }
+
       const items = db.items.map((i) =>
         i.id === op.itemId
           ? {
               ...i,
               status: 'to_writeoff' as const,
               condition: 'poor' as const,
-              notes: op.notes ? `${i.notes ? i.notes + ' | ' : ''}Defektas: ${op.notes}` : i.notes,
+              writeOffActId: targetAct.id,
+              writeOffActNumber: targetAct.actNumber,
+              writeOffReason: `${cleanReasonCategory}: ${cleanNotes}`,
+              writtenOffDate: undefined,
+              writtenOffYear: undefined,
+              notes: cleanNotes
+                ? `${i.notes ? i.notes + ' | ' : ''}Nurašymo teikimas (${targetAct.actNumber}): ${cleanNotes}`
+                : i.notes,
             }
           : i
       );
-      const writeOffActs = [op.act, ...db.writeOffActs];
+
       return {
         ok: true,
         database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, items, writeOffActs },
@@ -551,58 +818,200 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
     }
 
     case 'APPROVE_ITEM_WRITEOFF': {
+      // Viena bendra taisyklė: nurašymas tvirtinamas tik per susietą aktą (visas aktas kartu).
+      const targetItem = db.items.find((i) => i.id === op.itemId);
+      if (!targetItem) {
+        return { ok: false, statusCode: 404, error: 'Turtas nerastas.' };
+      }
+      if (targetItem.status !== 'to_writeoff') {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: `Turtas [${targetItem.inventoryNumber}] nėra būsenoje „Teikiamas nurašyti“.`,
+        };
+      }
+      const linkedDraft = findActiveDraftActForItem(db.writeOffActs, targetItem);
+      if (!linkedDraft) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: `Nerastas aktyvus nurašymo akto projektas daiktui [${targetItem.inventoryNumber}].`,
+        };
+      }
+      if (linkedDraft.items.length > 1) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: `Daiktas priklauso kelių daiktų aktui „${linkedDraft.actNumber}“ (${linkedDraft.items.length} vnt.). Pagal nustatytą taisyklę visas aktas turi būti tvirtinamas kartu.`,
+        };
+      }
+      return applyDbMutation(db, {
+        type: 'APPROVE_WRITEOFF_ACT',
+        actId: linkedDraft.id,
+        approvalYear: op.approvalYear,
+        approvedDate: op.approvedDate,
+        actNumber: op.actNumber || linkedDraft.actNumber,
+      });
+    }
+
+    case 'REJECT_WRITEOFF': {
+      const targetItem = db.items.find((i) => i.id === op.itemId);
+      if (!targetItem) {
+        return { ok: false, statusCode: 404, error: 'Turtas nerastas.' };
+      }
+      if (targetItem.status !== 'to_writeoff') {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: `Negalima atmesti teikimo: turto [${targetItem.inventoryNumber}] būsena nėra „Teikiamas nurašyti“.`,
+        };
+      }
+
+      const rejectionReason = op.reason?.trim() || 'Nurašymo teikimas atmestas komisijos / atsakingo asmens sprendimu';
+      const newRejectionEntries: WriteOffRejectionEntry[] = [];
+
+      const writeOffActs = db.writeOffActs.map((act) => {
+        if (act.status !== 'draft') return act;
+        const matchedItem = act.items.find((ai) => ai.itemId === op.itemId);
+        if (!matchedItem) return act;
+
+        const remainingItems = act.items.filter((ai) => ai.itemId !== op.itemId);
+        const rejectedRecord: WriteOffRejectedItemRecord = {
+          itemId: matchedItem.itemId,
+          name: matchedItem.name,
+          inventoryNumber: matchedItem.inventoryNumber,
+          price: matchedItem.price,
+          residualPrice: matchedItem.residualPrice,
+          submissionReason: matchedItem.reason,
+          rejectedAt: nowIso,
+          ...(op.rejectedByUserId ? { rejectedByUserId: op.rejectedByUserId } : {}),
+          ...(op.rejectedByUserName ? { rejectedByUserName: op.rejectedByUserName } : {}),
+          rejectionReason,
+        };
+
+        newRejectionEntries.push({
+          id: `wrej-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          actId: act.id,
+          actNumber: act.actNumber,
+          rejectedAt: nowIso,
+          ...(op.rejectedByUserId ? { rejectedByUserId: op.rejectedByUserId } : {}),
+          ...(op.rejectedByUserName ? { rejectedByUserName: op.rejectedByUserName } : {}),
+          reason: rejectionReason,
+        });
+
+        return {
+          ...act,
+          status: remainingItems.length === 0 ? ('cancelled' as const) : ('draft' as const),
+          items: remainingItems,
+          rejectedItems: [...(act.rejectedItems || []), rejectedRecord],
+        };
+      });
+
       const items = db.items.map((i) =>
         i.id === op.itemId
           ? {
               ...i,
-              status: 'written_off' as const,
-              writtenOffDate: op.approvedDate,
-              writtenOffYear: op.approvalYear,
-              writeOffActNumber: op.actNumber,
-              writeOffReason:
-                i.writeOffReason || op.fallbackNotes || 'Komisijos patvirtintas nurašymas',
+              status: 'active' as const,
+              writeOffActId: undefined,
+              writeOffActNumber: undefined,
+              writeOffReason: undefined,
+              writtenOffDate: undefined,
+              writtenOffYear: undefined,
+              writeOffRejectionHistory: [
+                ...(i.writeOffRejectionHistory || []),
+                ...newRejectionEntries,
+              ],
+              notes: i.notes
+                ? `${i.notes} | Teikimas atmestas (${todayStr}): ${rejectionReason}`
+                : `Teikimas atmestas (${todayStr}): ${rejectionReason}`,
             }
           : i
       );
-      const writeOffActs = db.writeOffActs.map((act) =>
-        act.items.some((actItem) => actItem.itemId === op.itemId)
-          ? {
-              ...act,
-              status: 'approved' as const,
-              actYear: op.approvalYear,
-              approvedDate: op.approvedDate,
-            }
-          : act
-      );
+
       return {
         ok: true,
         database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, items, writeOffActs },
       };
     }
 
-    case 'REJECT_WRITEOFF': {
-      const items = db.items.map((i) =>
-        i.id === op.itemId ? { ...i, status: 'active' as const } : i
-      );
-      return {
-        ok: true,
-        database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, items },
-      };
-    }
-
     case 'RESTORE_FROM_ARCHIVE': {
+      const targetItem = db.items.find((i) => i.id === op.itemId);
+      if (!targetItem) {
+        return { ok: false, statusCode: 404, error: 'Atkuriamas turtas nerastas.' };
+      }
+      if (targetItem.status !== 'written_off') {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: `Turtas [${targetItem.inventoryNumber}] nėra nurašyto turto archyve.`,
+        };
+      }
+
+      const validConditions: ReadonlySet<ItemCondition> = new Set(['new', 'good', 'fair', 'poor']);
+      if (!op.condition || !validConditions.has(op.condition)) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'Atkuriant turtą iš archyvo būtina nurodyti faktinę jo būklę (Nauja, Gera, Patenkinama arba Prasta).',
+        };
+      }
+
+      const restorationReason = (op.reason || op.noteAppend || '').trim();
+      if (!restorationReason) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'Nurodykite priežastį, kodėl turtas atkuriamas iš archyvo į apskaitą.',
+        };
+      }
+
+      const restoredAt = op.restoredAt || nowIso;
+      const conditionLt =
+        op.condition === 'new'
+          ? 'Nauja'
+          : op.condition === 'good'
+          ? 'Gera'
+          : op.condition === 'fair'
+          ? 'Patenkinama'
+          : 'Prasta';
+
+      const historyEntry: WriteOffHistoryEntry = {
+        id: `wh-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        actId: targetItem.writeOffActId,
+        actNumber: targetItem.writeOffActNumber,
+        writtenOffDate: targetItem.writtenOffDate,
+        writtenOffYear: targetItem.writtenOffYear,
+        writeOffReason: targetItem.writeOffReason,
+        restoredAt,
+        ...(op.restoredByUserId ? { restoredByUserId: op.restoredByUserId } : {}),
+        ...(op.restoredByUserName ? { restoredByUserName: op.restoredByUserName } : {}),
+        restorationReason,
+        conditionOnRestore: op.condition,
+      };
+
+      const whoLabel = op.restoredByUserName || 'Atsakingas asmuo';
+      const noteText = `Atkurta iš archyvo (${restoredAt.slice(0, 10)}, ${whoLabel}, būklė: ${conditionLt}): ${restorationReason}${
+        targetItem.writeOffActNumber ? ` [ankst. aktas ${targetItem.writeOffActNumber}]` : ''
+      }`;
+
+      // Istorinis WriteOffAct lieka nepakeistas! Išvalomi tik aktyvūs daikto nurašymo ryšiai, kad vėlesnis nurašymas nesusimaišytų su ankstesniu.
       const items = db.items.map((i) =>
         i.id === op.itemId
           ? {
               ...i,
               status: 'active' as const,
-              condition: 'good' as const,
-              notes: i.notes
-                ? `${i.notes} (${op.noteAppend || `Atkurta iš ${i.writtenOffYear || ''} m. archyvo`})`
-                : 'Atkurta iš archyvo',
+              condition: op.condition as ItemCondition,
+              writtenOffDate: undefined,
+              writtenOffYear: undefined,
+              writeOffActNumber: undefined,
+              writeOffReason: undefined,
+              writeOffActId: undefined,
+              writeOffHistory: [...(i.writeOffHistory || []), historyEntry],
+              notes: i.notes ? `${i.notes} | ${noteText}` : noteText,
             }
           : i
       );
+
       return {
         ok: true,
         database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, items },
@@ -610,8 +1019,25 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
     }
 
     case 'SAVE_WRITEOFF_ACT': {
-      const exists = db.writeOffActs.some((a) => a.id === op.act.id);
-      const writeOffActs = exists
+      const existing = db.writeOffActs.find((a) => a.id === op.act.id);
+      if (!op.act.actNumber?.trim()) {
+        return { ok: false, statusCode: 400, error: 'Nurašymo akto numeris negali būti tuščias.' };
+      }
+      if (!isWriteOffActNumberUnique(db.writeOffActs, op.act.actNumber, op.act.id)) {
+        return {
+          ok: false,
+          statusCode: 409,
+          error: `Nurašymo akto numeris „${op.act.actNumber}“ jau egzistuoja kitame akte.`,
+        };
+      }
+      if (existing && (existing.status === 'approved' || existing.status === 'cancelled')) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'Jau patvirtinto arba atšaukto nurašymo akto keisti negalima.',
+        };
+      }
+      const writeOffActs = existing
         ? db.writeOffActs.map((a) => (a.id === op.act.id ? op.act : a))
         : [op.act, ...db.writeOffActs];
       return {
@@ -625,34 +1051,228 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
       if (!targetAct) {
         return { ok: false, statusCode: 404, error: 'Nurašymo aktas nerastas.' };
       }
+      if (targetAct.status === 'approved') {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: `Nurašymo aktas „${targetAct.actNumber}“ jau yra patvirtintas. Pakartotinis tvirtinimas negalimas.`,
+        };
+      }
+      if (targetAct.status === 'cancelled') {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: `Nurašymo projektas „${targetAct.actNumber}“ buvo atšauktas atmetus visus jo daiktus.`,
+        };
+      }
+      if (!targetAct.items || targetAct.items.length === 0) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: `Nurašymo akte „${targetAct.actNumber}“ nėra nė vieno galiojančio daikto.`,
+        };
+      }
+      if (!op.approvedDate || !isValidIsoDateString(op.approvedDate.trim())) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'Netinkamas patvirtinimo datos formatas (tikimasi YYYY-MM-DD).',
+        };
+      }
+      if (!Number.isInteger(op.approvalYear) || op.approvalYear < 1990 || op.approvalYear > 2100) {
+        return { ok: false, statusCode: 400, error: 'Netinkami nurašymo archyvo metai.' };
+      }
+
+      const finalActNumber = (op.actNumber ?? targetAct.actNumber).trim();
+      if (!finalActNumber) {
+        return { ok: false, statusCode: 400, error: 'Nurašymo akto numeris negali būti tuščias.' };
+      }
+      if (!isWriteOffActNumberUnique(db.writeOffActs, finalActNumber, targetAct.id)) {
+        return {
+          ok: false,
+          statusCode: 409,
+          error: `Nurašymo akto numeris „${finalActNumber}“ jau naudojamas kitame akte.`,
+        };
+      }
+
+      // Prieš bet kokį keitimą griežtai patikriname VISUS akto daiktus (jokio dalinio išsaugojimo klaidos atveju!)
+      const seenItemIds = new Set<string>();
+      const rejectedInAct = new Set((targetAct.rejectedItems || []).map((r) => r.itemId));
+      const itemMap = new Map(db.items.map((it) => [it.id, it]));
+
+      for (const actItem of targetAct.items) {
+        if (seenItemIds.has(actItem.itemId)) {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: `Akte „${finalActNumber}“ dubliuojamas daiktas [${actItem.inventoryNumber}].`,
+          };
+        }
+        seenItemIds.add(actItem.itemId);
+
+        if (rejectedInAct.has(actItem.itemId)) {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: `Daiktas [${actItem.inventoryNumber}] buvo atmestas šiame projekte ir negali būti nurašytas be naujo teikimo.`,
+          };
+        }
+
+        const realItem = itemMap.get(actItem.itemId);
+        if (!realItem) {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: `Akte nurodytas daiktas [${actItem.inventoryNumber}] (${actItem.name}) neegzistuoja inventoriaus sąraše. Aktas nepatvirtintas.`,
+          };
+        }
+        if (realItem.status !== 'to_writeoff') {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: `Daikto [${realItem.inventoryNumber}] „${realItem.name}“ būsena yra „${realItem.status}“, o ne „Teikiamas nurašyti“. Aktas nepatvirtintas.`,
+          };
+        }
+        if (realItem.writeOffActId && realItem.writeOffActId !== targetAct.id) {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: `Daiktas [${realItem.inventoryNumber}] priklauso kitam nurašymo projektui (${realItem.writeOffActNumber || realItem.writeOffActId}). Aktas nepatvirtintas.`,
+          };
+        }
+      }
+
+      const approvedDateClean = op.approvedDate.trim();
       const writeOffActs = db.writeOffActs.map((a) =>
         a.id === op.actId
           ? {
               ...a,
+              actNumber: finalActNumber,
               status: 'approved' as const,
               actYear: op.approvalYear,
-              approvedDate: op.approvedDate,
+              approvedDate: approvedDateClean,
+              ...(op.approvedByUserId ? { approvedByUserId: op.approvedByUserId } : {}),
+              ...(op.approvedByUserName ? { approvedByUserName: op.approvedByUserName } : {}),
             }
           : a
       );
-      const actItemIds = new Set(targetAct.items.map((it) => it.itemId));
+
+      const actReasonMap = new Map(targetAct.items.map((it) => [it.itemId, it.reason]));
       const items = db.items.map((i) =>
-        actItemIds.has(i.id)
+        seenItemIds.has(i.id)
           ? {
               ...i,
               status: 'written_off' as const,
-              writtenOffDate: op.approvedDate,
+              writtenOffDate: approvedDateClean,
               writtenOffYear: op.approvalYear,
-              writeOffActNumber: targetAct.actNumber,
-              writeOffReason: targetAct.reasonCategory,
+              writeOffActNumber: finalActNumber,
+              writeOffReason: targetAct.reasonCategory || actReasonMap.get(i.id) || i.writeOffReason,
               writeOffActId: targetAct.id,
             }
           : i
       );
+
       return {
         ok: true,
         database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, writeOffActs, items },
       };
+    }
+
+    case 'RECONCILE_WRITEOFF_ISSUE': {
+      if (op.action === 'return_to_active') {
+        if (!op.itemId) return { ok: false, statusCode: 400, error: 'Trūksta daikto ID.' };
+        const target = db.items.find((i) => i.id === op.itemId);
+        if (!target) return { ok: false, statusCode: 404, error: 'Turtas nerastas.' };
+        if (target.status !== 'to_writeoff') {
+          return { ok: false, statusCode: 400, error: 'Šį veiksmą galima taikyti tik „to_writeoff“ daiktams.' };
+        }
+        const stillInDraft = db.writeOffActs.some(
+          (a) => a.status === 'draft' && a.items.some((ai) => ai.itemId === op.itemId)
+        );
+        if (stillInDraft) {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: 'Daiktas vis dar yra aktyviame nurašymo projekte – naudokite „Atmesti“.',
+          };
+        }
+        const items = db.items.map((i) =>
+          i.id === op.itemId
+            ? {
+                ...i,
+                status: 'active' as const,
+                writeOffActId: undefined,
+                writeOffActNumber: undefined,
+                writeOffReason: undefined,
+                notes: i.notes
+                  ? `${i.notes} | Sutvarkytas nesusietas nurašymo teikimas (${todayStr})`
+                  : `Sutvarkytas nesusietas nurašymo teikimas (${todayStr})`,
+              }
+            : i
+        );
+        return {
+          ok: true,
+          database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, items },
+        };
+      }
+
+      if (op.action === 'remove_stale_draft_item') {
+        if (!op.actId || !op.itemId) {
+          return { ok: false, statusCode: 400, error: 'Trūksta akto arba daikto ID.' };
+        }
+        const targetAct = db.writeOffActs.find((a) => a.id === op.actId);
+        if (!targetAct || targetAct.status !== 'draft') {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: 'Valyti galima tik nepatvirtintų nurašymo projektų įrašus.',
+          };
+        }
+        const writeOffActs = db.writeOffActs.map((a) => {
+          if (a.id !== op.actId) return a;
+          const remaining = a.items.filter((ai) => ai.itemId !== op.itemId);
+          return {
+            ...a,
+            items: remaining,
+            status: remaining.length === 0 ? ('cancelled' as const) : ('draft' as const),
+          };
+        });
+        return {
+          ok: true,
+          database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, writeOffActs },
+        };
+      }
+
+      if (op.action === 'link_by_existing_act_number') {
+        if (!op.itemId || !op.actId) {
+          return { ok: false, statusCode: 400, error: 'Trūksta daikto arba akto ID.' };
+        }
+        const targetItem = db.items.find((i) => i.id === op.itemId);
+        const targetAct = db.writeOffActs.find((a) => a.id === op.actId);
+        if (!targetItem || !targetAct || targetAct.status !== 'approved') {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: 'Nerastas patvirtintas aktas susiejimui.',
+          };
+        }
+        if (!targetAct.items.some((ai) => ai.itemId === targetItem.id)) {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: 'Šis daiktas nėra įtrauktas nurodyto akto sąraše.',
+          };
+        }
+        const items = db.items.map((i) =>
+          i.id === op.itemId ? { ...i, writeOffActId: targetAct.id } : i
+        );
+        return {
+          ok: true,
+          database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, items },
+        };
+      }
+
+      return { ok: false, statusCode: 400, error: 'Nežinomas sutvarkymo veiksmas.' };
     }
 
     case 'SAVE_FAULT_REPORT': {
@@ -1008,7 +1628,9 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
       const linkedItemsCount = db.items.filter((i) => i.responsibleUserId === op.userId).length;
       const linkedDeptsCount = db.departments.filter((d) => d.managerId === op.userId).length;
       const linkedRoomsCount = db.rooms.filter((r) => r.defaultResponsiblePersonId === op.userId).length;
-      const linkedAuditsCount = db.auditSessions.filter((s) => s.committeeChairmanId === op.userId).length;
+      const linkedAuditsCount = db.auditSessions.filter(
+        (s) => s.status !== 'completed' && s.committeeChairmanId === op.userId
+      ).length;
 
       if (linkedItemsCount > 0 || linkedDeptsCount > 0 || linkedRoomsCount > 0 || linkedAuditsCount > 0) {
         return {
@@ -1019,10 +1641,18 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
       }
 
       const movements = backfillMovementSnapshots(db.movements, db.departments, db.rooms, db.users);
+      const auditSessions = db.auditSessions.map((s) =>
+        s.status === 'completed' && s.committeeChairmanId === op.userId && !s.committeeChairman
+          ? {
+              ...s,
+              committeeChairman: `${targetUser.fullName} (${targetUser.roleTitle || 'Komisijos pirmininkas'})`,
+            }
+          : s
+      );
       const users = db.users.filter((u) => u.id !== op.userId);
       return {
         ok: true,
-        database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, users, movements },
+        database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, users, movements, auditSessions },
       };
     }
 
@@ -1090,15 +1720,23 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
           ? { ...r, defaultResponsiblePersonId: op.targetUserId }
           : r
       );
-      const auditSessions = db.auditSessions.map((s) =>
-        s.committeeChairmanId === op.userId
-          ? {
-              ...s,
-              committeeChairmanId: op.targetUserId,
-              committeeChairman: `${targetUser.fullName} (${targetUser.roleTitle || 'Komisijos pirmininkas'})`,
-            }
-          : s
-      );
+      const auditSessions = db.auditSessions.map((s) => {
+        if (s.committeeChairmanId !== op.userId) return s;
+        if (s.status === 'completed') {
+          // Užbaigtų inventorizacijų istorinio pirmininko niekada neperrašome nauju darbuotoju!
+          return s.committeeChairman
+            ? s
+            : {
+                ...s,
+                committeeChairman: `${sourceUser.fullName} (${sourceUser.roleTitle || 'Komisijos pirmininkas'})`,
+              };
+        }
+        return {
+          ...s,
+          committeeChairmanId: op.targetUserId,
+          committeeChairman: `${targetUser.fullName} (${targetUser.roleTitle || 'Komisijos pirmininkas'})`,
+        };
+      });
       const users = db.users.filter((u) => u.id !== op.userId);
 
       return {

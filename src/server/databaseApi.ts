@@ -306,7 +306,7 @@ export function createDatabaseApiRouter(options: DatabaseApiOptions) {
 
   // Konfliktų ir idempotencijos būsena serverio atmintyje
   let serverBootRevision = 0;
-  const entityRevisions = new Map<string, number>();
+  const entityHistory = new Map<string, Array<{ revision: number; clientOpId?: string }>>();
   const processedClientOps = new Map<
     string,
     { revision: number; database: AppDatabase; merged: boolean }
@@ -418,10 +418,11 @@ export function createDatabaseApiRouter(options: DatabaseApiOptions) {
   // Vientisas konkrečios operacijos pritaikymas su konfliktų tikrinimu ir sujungimu
   router.post('/api/mutate', async (req, res) => {
     try {
-      const { baseRevision, clientOpId, operation } = req.body as {
+      const { baseRevision, clientOpId, operation, precedingClientOpIds } = req.body as {
         baseRevision?: number;
         clientOpId?: string;
         operation?: DbMutation;
+        precedingClientOpIds?: string[];
       };
 
       if (!operation || typeof operation.type !== 'string') {
@@ -506,10 +507,18 @@ export function createDatabaseApiRouter(options: DatabaseApiOptions) {
 
         // Tikriname ar tas pats objektas nebuvo pakeistas kito naudotojo tarp baseRevision ir currentRevision
         const touchedKeys = getTouchedEntityKeys(currentDb, operation);
+        const precedingSet = new Set(
+          Array.isArray(precedingClientOpIds) ? precedingClientOpIds : []
+        );
         if (baseRevision < currentRevision) {
           for (const key of touchedKeys) {
-            const modRev = entityRevisions.get(key) || 0;
-            if (modRev > baseRevision) {
+            const historyEntries = entityHistory.get(key) || [];
+            const newerForeignChange = historyEntries.some(
+              (entry) =>
+                entry.revision > baseRevision &&
+                (!entry.clientOpId || !precedingSet.has(entry.clientOpId))
+            );
+            if (newerForeignChange) {
               return {
                 status: 409,
                 body: {
@@ -564,7 +573,10 @@ export function createDatabaseApiRouter(options: DatabaseApiOptions) {
         writeFileAtomic(DB_FILE, JSON.stringify(postValidation.data, null, 2));
 
         for (const key of touchedKeys) {
-          entityRevisions.set(key, nextRevision);
+          const list = entityHistory.get(key) || [];
+          list.push({ revision: nextRevision, clientOpId });
+          if (list.length > 50) list.shift();
+          entityHistory.set(key, list);
         }
 
         const merged = baseRevision < currentRevision;
@@ -683,7 +695,7 @@ export function createDatabaseApiRouter(options: DatabaseApiOptions) {
 
         // Po pilno bazės pakeitimo atnaujiname konfliktų sekimo ribą
         serverBootRevision = nextRevision;
-        entityRevisions.clear();
+        entityHistory.clear();
         processedClientOps.clear();
 
         return {
@@ -693,6 +705,7 @@ export function createDatabaseApiRouter(options: DatabaseApiOptions) {
             revision: nextRevision,
             database: nextDb,
             migrated: validation.migrated,
+            warnings: validation.warnings,
             backupFile,
           },
         };
@@ -765,7 +778,7 @@ export function createDatabaseApiRouter(options: DatabaseApiOptions) {
 
         writeFileAtomic(DB_FILE, JSON.stringify(nextDb, null, 2));
         serverBootRevision = nextRevision;
-        entityRevisions.clear();
+        entityHistory.clear();
         processedClientOps.clear();
 
         return {

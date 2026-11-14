@@ -505,7 +505,13 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
               <div className="bg-slate-50 p-2.5 rounded border border-slate-100">
                 <span className="text-slate-500 block text-[11px]">Būsena</span>
                 <span className="font-medium text-slate-900 capitalize">
-                  {item.status === 'active' ? 'Aktyvus / Naudojamas' : item.status === 'in_repair' ? 'Remontuojamas' : 'Nurašytas'}
+                  {item.status === 'active'
+                    ? 'Aktyvus / Naudojamas'
+                    : item.status === 'in_repair'
+                    ? 'Remontuojamas'
+                    : item.status === 'to_writeoff'
+                    ? 'Teikiamas nurašyti'
+                    : 'Nurašytas'}
                 </span>
               </div>
               <div className="bg-slate-50 p-2.5 rounded border border-slate-100">
@@ -524,6 +530,66 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
             )}
           </div>
         </div>
+
+        {/* Write-off, Restoration & Rejection History */}
+        {((item.writeOffHistory && item.writeOffHistory.length > 0) ||
+          (item.writeOffRejectionHistory && item.writeOffRejectionHistory.length > 0) ||
+          item.status === 'written_off' ||
+          item.status === 'to_writeoff') && (
+          <div className="pt-2 border-t border-slate-100 space-y-2 text-xs">
+            <div className="flex items-center gap-1.5 font-semibold text-slate-800">
+              <Trash2 className="w-4 h-4 text-rose-500" />
+              <span>Nurašymo ir atkūrimo istorija</span>
+            </div>
+
+            {(item.status === 'written_off' || item.status === 'to_writeoff') && (
+              <div className="p-2.5 rounded border border-rose-200 bg-rose-50/60 space-y-0.5">
+                <div className="font-semibold text-rose-900">
+                  {item.status === 'written_off' ? 'Aktyvus nurašymas archyve' : 'Aktyvus teikimas nurašymui'}
+                  {item.writeOffActNumber ? ` · Aktas ${item.writeOffActNumber}` : ''}
+                  {item.writtenOffYear ? ` (${item.writtenOffYear} m.)` : ''}
+                </div>
+                {item.writtenOffDate && (
+                  <div className="text-[11px] text-slate-600">Nurašymo data: {item.writtenOffDate}</div>
+                )}
+                {item.writeOffReason && (
+                  <div className="text-[11px] text-slate-700">Priežastis: {item.writeOffReason}</div>
+                )}
+              </div>
+            )}
+
+            {item.writeOffHistory?.map((h) => (
+              <div key={h.id} className="p-2.5 rounded border border-purple-200 bg-purple-50/50 space-y-0.5">
+                <div className="font-semibold text-purple-950">
+                  Ankstesnis nurašymas {h.actNumber ? `(${h.actNumber})` : ''}
+                  {h.writtenOffDate ? ` · ${h.writtenOffDate}` : h.writtenOffYear ? ` · ${h.writtenOffYear} m.` : ''}
+                </div>
+                {h.writeOffReason && (
+                  <div className="text-[11px] text-slate-700">Nurašymo priežastis: {h.writeOffReason}</div>
+                )}
+                {h.restoredAt && (
+                  <div className="text-[11px] text-emerald-800 font-medium pt-0.5">
+                    Atkurta į apskaitą: {h.restoredAt.slice(0, 16).replace('T', ' ')}
+                    {h.restoredByUserName ? ` · Kas: ${h.restoredByUserName}` : ''}
+                    {h.conditionOnRestore ? ` · Būklė: ${h.conditionOnRestore === 'new' ? 'Nauja' : h.conditionOnRestore === 'good' ? 'Gera' : h.conditionOnRestore === 'fair' ? 'Patenkinama' : 'Prasta'}` : ''}
+                    {h.restorationReason ? ` · Priežastis: ${h.restorationReason}` : ''}
+                  </div>
+                )}
+              </div>
+            ))}
+
+            {item.writeOffRejectionHistory?.map((r) => (
+              <div key={r.id} className="p-2.5 rounded border border-slate-200 bg-slate-50 space-y-0.5">
+                <div className="font-semibold text-slate-800">
+                  Atmestas teikimas iš projekto {r.actNumber} · {r.rejectedAt.slice(0, 16).replace('T', ' ')}
+                </div>
+                <div className="text-[11px] text-slate-600">
+                  {r.rejectedByUserName ? `Atmetė: ${r.rejectedByUserName} · ` : ''}Priežastis: {r.reason}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* History of transfers */}
         <div className="pt-2 border-t border-slate-100">

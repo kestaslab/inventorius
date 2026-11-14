@@ -12,11 +12,15 @@ import {
   MovementRecord,
   WriteOffAct,
   WriteOffActItem,
+  WriteOffRejectedItemRecord,
+  WriteOffHistoryEntry,
+  WriteOffRejectionEntry,
   AuditSession,
   AuthSettings,
   DefectReport,
   ComputerSpecs,
 } from '../types/inventory';
+import { analyzeWriteOffIntegrity } from './writeOffUtils';
 
 export const CURRENT_DB_VERSION = '1.1.0';
 export const SUPPORTED_DB_VERSIONS = ['1.0.0', '1.1.0'] as const;
@@ -230,6 +234,119 @@ function validateDefectReports(
     reports.push(r as unknown as DefectReport);
   }
   return { ok: true, reports };
+}
+
+function validateWriteOffHistory(
+  rawHistory: unknown,
+  context: string
+): { ok: true; history?: WriteOffHistoryEntry[] } | { ok: false; error: string } {
+  if (rawHistory === undefined) return { ok: true, history: undefined };
+  if (!Array.isArray(rawHistory)) {
+    return { ok: false, error: `${context}: „writeOffHistory“ turi būti masyvas.` };
+  }
+  const history: WriteOffHistoryEntry[] = [];
+  for (let i = 0; i < rawHistory.length; i++) {
+    const h = rawHistory[i];
+    if (!isPlainObject(h) || !isNonEmptyString(h.id)) {
+      return { ok: false, error: `${context} -> writeOffHistory[${i}]: netinkamas įrašas.` };
+    }
+    if (
+      !isOptionalString(h.actId) ||
+      !isOptionalString(h.actNumber) ||
+      !isOptionalString(h.writtenOffDate) ||
+      (h.writtenOffYear !== undefined && !isFiniteNumber(h.writtenOffYear)) ||
+      !isOptionalString(h.writeOffReason) ||
+      !isOptionalString(h.restoredAt) ||
+      !isOptionalString(h.restoredByUserId) ||
+      !isOptionalString(h.restoredByUserName) ||
+      !isOptionalString(h.restorationReason) ||
+      (h.conditionOnRestore !== undefined &&
+        !VALID_CONDITIONS.has(h.conditionOnRestore as ItemCondition))
+    ) {
+      return {
+        ok: false,
+        error: `${context} -> writeOffHistory[${i}]: neteisingas laukų tipas.`,
+      };
+    }
+    history.push(h as unknown as WriteOffHistoryEntry);
+  }
+  return { ok: true, history };
+}
+
+function validateWriteOffRejectionHistory(
+  rawRejections: unknown,
+  context: string
+): { ok: true; rejections?: WriteOffRejectionEntry[] } | { ok: false; error: string } {
+  if (rawRejections === undefined) return { ok: true, rejections: undefined };
+  if (!Array.isArray(rawRejections)) {
+    return { ok: false, error: `${context}: „writeOffRejectionHistory“ turi būti masyvas.` };
+  }
+  const rejections: WriteOffRejectionEntry[] = [];
+  for (let i = 0; i < rawRejections.length; i++) {
+    const r = rawRejections[i];
+    if (
+      !isPlainObject(r) ||
+      !isNonEmptyString(r.id) ||
+      !isNonEmptyString(r.actId) ||
+      !isNonEmptyString(r.actNumber) ||
+      !isNonEmptyString(r.rejectedAt) ||
+      typeof r.reason !== 'string'
+    ) {
+      return {
+        ok: false,
+        error: `${context} -> writeOffRejectionHistory[${i}]: trūksta privalomų laukų.`,
+      };
+    }
+    if (!isOptionalString(r.rejectedByUserId) || !isOptionalString(r.rejectedByUserName)) {
+      return {
+        ok: false,
+        error: `${context} -> writeOffRejectionHistory[${i}]: neteisingas papildomų laukų tipas.`,
+      };
+    }
+    rejections.push(r as unknown as WriteOffRejectionEntry);
+  }
+  return { ok: true, rejections };
+}
+
+function validateActRejectedItems(
+  rawRejected: unknown,
+  context: string
+): { ok: true; rejectedItems?: WriteOffRejectedItemRecord[] } | { ok: false; error: string } {
+  if (rawRejected === undefined) return { ok: true, rejectedItems: undefined };
+  if (!Array.isArray(rawRejected)) {
+    return { ok: false, error: `${context}: „rejectedItems“ turi būti masyvas.` };
+  }
+  const list: WriteOffRejectedItemRecord[] = [];
+  for (let i = 0; i < rawRejected.length; i++) {
+    const ri = rawRejected[i];
+    if (
+      !isPlainObject(ri) ||
+      !isNonEmptyString(ri.itemId) ||
+      !isNonEmptyString(ri.name) ||
+      !isNonEmptyString(ri.inventoryNumber) ||
+      !isFiniteNumber(ri.price) ||
+      !isNonEmptyString(ri.rejectedAt) ||
+      typeof ri.rejectionReason !== 'string'
+    ) {
+      return {
+        ok: false,
+        error: `${context} -> rejectedItems[${i}]: neteisingi atmesto įrašo laukai.`,
+      };
+    }
+    if (
+      (ri.residualPrice !== undefined && !isFiniteNumber(ri.residualPrice)) ||
+      !isOptionalString(ri.submissionReason) ||
+      !isOptionalString(ri.rejectedByUserId) ||
+      !isOptionalString(ri.rejectedByUserName)
+    ) {
+      return {
+        ok: false,
+        error: `${context} -> rejectedItems[${i}]: neteisingas papildomų laukų tipas.`,
+      };
+    }
+    list.push(ri as unknown as WriteOffRejectedItemRecord);
+  }
+  return { ok: true, rejectedItems: list };
 }
 
 /**
@@ -648,6 +765,18 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
     const defectCheck = validateDefectReports(it.defectReports, `${ctx} ([${it.inventoryNumber}])`);
     if (!defectCheck.ok) return defectCheck;
 
+    const historyCheck = validateWriteOffHistory(
+      it.writeOffHistory,
+      `${ctx} ([${it.inventoryNumber}])`
+    );
+    if (!historyCheck.ok) return historyCheck;
+
+    const rejCheck = validateWriteOffRejectionHistory(
+      it.writeOffRejectionHistory,
+      `${ctx} ([${it.inventoryNumber}])`
+    );
+    if (!rejCheck.ok) return rejCheck;
+
     itemIds.add(it.id);
     inventoryNumbers.add(normalizedInv);
 
@@ -660,6 +789,8 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
       fundingSource,
       ...(specsCheck.specs ? { specs: specsCheck.specs } : {}),
       ...(defectCheck.reports ? { defectReports: defectCheck.reports } : {}),
+      ...(historyCheck.history ? { writeOffHistory: historyCheck.history } : {}),
+      ...(rejCheck.rejections ? { writeOffRejectionHistory: rejCheck.rejections } : {}),
     });
   }
 
@@ -743,7 +874,7 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
     if (actIds.has(a.id)) {
       return { ok: false, error: `${ctx}: pasikartojantis akto ID „${a.id}“.` };
     }
-    if (a.status !== 'draft' && a.status !== 'approved') {
+    if (a.status !== 'draft' && a.status !== 'approved' && a.status !== 'cancelled') {
       return { ok: false, error: `${ctx}: neteisinga būsena „${String(a.status)}“.` };
     }
     if (!isStringArray(a.committeeMembers)) {
@@ -773,10 +904,15 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
       }
       actItems.push(ai as unknown as WriteOffActItem);
     }
+    const rejectedCheck = validateActRejectedItems(a.rejectedItems, ctx);
+    if (!rejectedCheck.ok) return rejectedCheck;
+
     if (
       (a.actYear !== undefined && !isFiniteNumber(a.actYear)) ||
       !isOptionalString(a.notes) ||
-      !isOptionalString(a.approvedDate)
+      !isOptionalString(a.approvedDate) ||
+      !isOptionalString(a.approvedByUserId) ||
+      !isOptionalString(a.approvedByUserName)
     ) {
       return { ok: false, error: `${ctx}: neteisingas papildomų laukų tipas.` };
     }
@@ -785,6 +921,7 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
     writeOffActs.push({
       ...(a as unknown as WriteOffAct),
       items: actItems,
+      ...(rejectedCheck.rejectedItems ? { rejectedItems: rejectedCheck.rejectedItems } : {}),
     });
   }
 
@@ -869,6 +1006,12 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
       }
       photos[key] = val;
     }
+  }
+
+  // 12. Nurašymo aktų ir daiktų tarpusavio suderinamumo patikra (įspėjimai be dirbtinių istorinių duomenų išgalvojimo)
+  const integrityIssues = analyzeWriteOffIntegrity(items, writeOffActs);
+  for (const issue of integrityIssues) {
+    warnings.push(issue.message);
   }
 
   return {
