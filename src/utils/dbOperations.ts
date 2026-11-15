@@ -9,6 +9,7 @@ import {
   AuditCheckMethod,
   AuditCheckRecord,
   AuthSettings,
+  OrganizationSettings,
   DefectReport,
   ItemCondition,
   WriteOffHistoryEntry,
@@ -18,6 +19,14 @@ import {
   getUserAssignedRoomIds,
 } from '../types/inventory';
 import { AppDatabase, CURRENT_DB_VERSION, isValidIsoDateString } from './databaseValidation';
+import { cloneOrganizationSettings } from './organization';
+import {
+  formatDateTimeVilnius,
+  getCalendarDatePart,
+  getCalendarYearFromDate,
+  getCurrentYearVilnius,
+  getTodayVilniusDate,
+} from './dateUtils';
 import {
   findActiveDraftActForItem,
   generateNextWriteOffActNumber,
@@ -108,6 +117,7 @@ export type DbMutation =
   | { type: 'ARCHIVE_USER'; userId: string; isArchived: boolean }
   | { type: 'BATCH_IMPORT_USERS'; users: User[] }
   | { type: 'UPDATE_AUTH_SETTINGS'; authSettings: AuthSettings }
+  | { type: 'UPDATE_ORGANIZATION_SETTINGS'; organizationSettings: OrganizationSettings }
   | { type: 'UPDATE_AUDIT_SESSION'; session: AuditSession }
   | {
       type: 'CREATE_AUDIT_SESSION';
@@ -291,6 +301,8 @@ export function getTouchedEntityKeys(db: AppDatabase, op: DbMutation): string[] 
       return op.users.map((u) => `user_email:${u.email.toLowerCase()}`);
     case 'UPDATE_AUTH_SETTINGS':
       return ['authSettings'];
+    case 'UPDATE_ORGANIZATION_SETTINGS':
+      return ['organizationSettings'];
     case 'UPDATE_AUDIT_SESSION':
       return [`audit:${op.session.id}`];
     case 'CREATE_AUDIT_SESSION':
@@ -439,7 +451,8 @@ function buildMovementRecord(
     seqOffset?: number;
   }
 ): MovementRecord {
-  const year = new Date().getFullYear();
+  const nowDate = new Date();
+  const year = getCurrentYearVilnius(nowDate);
   const fromDept = db.departments.find((d) => d.id === params.fromDepartmentId);
   const toDept = db.departments.find((d) => d.id === params.toDepartmentId);
   const fromRoom = db.rooms.find((r) => r.id === params.fromRoomId);
@@ -468,7 +481,7 @@ function buildMovementRecord(
     toDepartmentName: toDept?.name,
     toRoomName: toRoom ? formatRoomName(toRoom, true) : undefined,
     toUserName: toUser?.fullName,
-    date: params.date || new Date().toISOString().replace('T', ' ').slice(0, 16),
+    date: params.date || formatDateTimeVilnius(nowDate.toISOString()),
     reason: params.reason,
     actNumber: params.actNumber || nextMovementActNumber(existingMovements, year),
   };
@@ -520,8 +533,9 @@ function backfillMovementSnapshots(
 }
 
 export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyResult {
-  const nowIso = new Date().toISOString();
-  const todayStr = nowIso.slice(0, 10);
+  const nowDate = new Date();
+  const nowIso = nowDate.toISOString();
+  const todayStr = getTodayVilniusDate(nowDate);
 
   switch (op.type) {
     case 'SAVE_ITEM': {
@@ -860,7 +874,8 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
         }
         const actDate =
           op.act.date && isValidIsoDateString(op.act.date) ? op.act.date : todayStr;
-        const year = op.act.actYear || Number(actDate.slice(0, 4)) || new Date().getFullYear();
+        const year =
+          op.act.actYear || getCalendarYearFromDate(actDate) || getCurrentYearVilnius();
         const rawNumber = (op.act.actNumber || '').trim();
         let assignedNumber: string;
 
@@ -1240,6 +1255,7 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
       }
 
       const approvedDateClean = op.approvedDate.trim();
+      const orgSnap = cloneOrganizationSettings(db.organizationSettings);
       const writeOffActs = db.writeOffActs.map((a) =>
         a.id === op.actId
           ? {
@@ -1248,6 +1264,7 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
               status: 'approved' as const,
               actYear: op.approvalYear,
               approvedDate: approvedDateClean,
+              organizationSnapshot: orgSnap,
               ...(op.approvedByUserId ? { approvedByUserId: op.approvedByUserId } : {}),
               ...(op.approvedByUserName ? { approvedByUserName: op.approvedByUserName } : {}),
             }
@@ -1899,6 +1916,28 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
       };
     }
 
+    case 'UPDATE_ORGANIZATION_SETTINGS': {
+      const s = op.organizationSettings;
+      if (!s.name?.trim() || !s.code?.trim() || !s.address?.trim() || !s.directorTitle?.trim()) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'Įstaigos pavadinimas, juridinio asmens kodas, adresas ir vadovo pareigos yra privalomi.',
+        };
+      }
+      const nextSettings = cloneOrganizationSettings(s);
+      // Istoriniai jau užbaigti dokumentai (completed AuditSession ir approved WriteOffAct) NIEKADA neperrašomi!
+      return {
+        ok: true,
+        database: {
+          ...db,
+          version: CURRENT_DB_VERSION,
+          exportedAt: nowIso,
+          organizationSettings: nextSettings,
+        },
+      };
+    }
+
     case 'UPDATE_AUDIT_SESSION': {
       const existing = db.auditSessions.find((s) => s.id === op.session.id);
       if (existing?.status === 'completed') {
@@ -2067,7 +2106,7 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
       const actualRoomName = formatRoomName(actualRoom, true);
       const outcome = expectedRoomId === actualRoom.id ? 'found' : 'found_elsewhere';
       const checkedAt = op.checkedAt || nowIso;
-      const auditDateOnly = checkedAt.slice(0, 10);
+      const auditDateOnly = getCalendarDatePart(checkedAt) || todayStr;
 
       const itemSnapshot =
         existingRecord?.itemSnapshot ||
@@ -2264,6 +2303,7 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
         }
       }
 
+      const sessionOrgSnapshot = cloneOrganizationSettings(db.organizationSettings);
       const auditSessions = db.auditSessions.map((s) =>
         s.id === op.sessionId
           ? {
@@ -2274,6 +2314,7 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
               ...(op.completedByUserName ? { completedByUserName: op.completedByUserName } : {}),
               snapshotItems: frozenSnapshot,
               missingItemIds: Array.from(finalMissingIds),
+              organizationSnapshot: sessionOrgSnapshot,
               completionSummary: {
                 totalExpected: frozenSnapshot.length,
                 foundInPlaceCount,

@@ -17,10 +17,12 @@ import {
   WriteOffRejectionEntry,
   AuditSession,
   AuthSettings,
+  OrganizationSettings,
   DefectReport,
   ComputerSpecs,
 } from '../types/inventory';
 import { analyzeWriteOffIntegrity } from './writeOffUtils';
+import { DEFAULT_ORGANIZATION_SETTINGS, cloneOrganizationSettings } from './organization';
 
 export const CURRENT_DB_VERSION = '1.1.0';
 export const SUPPORTED_DB_VERSIONS = ['1.0.0', '1.1.0'] as const;
@@ -37,6 +39,7 @@ export interface AppDatabase {
   writeOffActs: WriteOffAct[];
   auditSessions: AuditSession[];
   authSettings?: AuthSettings;
+  organizationSettings?: OrganizationSettings;
   photos?: Record<string, string>;
 }
 
@@ -347,6 +350,39 @@ function validateActRejectedItems(
     list.push(ri as unknown as WriteOffRejectedItemRecord);
   }
   return { ok: true, rejectedItems: list };
+}
+
+function validateOrganizationSettingsValue(
+  rawOrg: unknown,
+  context: string
+): { ok: true; value?: OrganizationSettings } | { ok: false; error: string } {
+  if (rawOrg === undefined) return { ok: true, value: undefined };
+  if (!isPlainObject(rawOrg)) {
+    return { ok: false, error: `${context}: įstaigos rekvizitai turi būti objektas.` };
+  }
+  if (
+    !isNonEmptyString(rawOrg.name) ||
+    !isNonEmptyString(rawOrg.code) ||
+    !isNonEmptyString(rawOrg.address) ||
+    !isNonEmptyString(rawOrg.directorTitle) ||
+    !isOptionalString(rawOrg.directorName)
+  ) {
+    return {
+      ok: false,
+      error: `${context}: trūksta privalomų įstaigos rekvizitų laukų (name, code, address, directorTitle).`,
+    };
+  }
+  const directorName = typeof rawOrg.directorName === 'string' ? rawOrg.directorName.trim() : '';
+  return {
+    ok: true,
+    value: {
+      name: rawOrg.name.trim(),
+      code: rawOrg.code.trim(),
+      address: rawOrg.address.trim(),
+      directorTitle: rawOrg.directorTitle.trim(),
+      ...(directorName ? { directorName } : {}),
+    },
+  };
 }
 
 /**
@@ -917,11 +953,18 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
       return { ok: false, error: `${ctx}: neteisingas papildomų laukų tipas.` };
     }
 
+    const orgSnapCheck = validateOrganizationSettingsValue(
+      a.organizationSnapshot,
+      `${ctx} -> organizationSnapshot`
+    );
+    if (!orgSnapCheck.ok) return orgSnapCheck;
+
     actIds.add(a.id);
     writeOffActs.push({
       ...(a as unknown as WriteOffAct),
       items: actItems,
       ...(rejectedCheck.rejectedItems ? { rejectedItems: rejectedCheck.rejectedItems } : {}),
+      ...(orgSnapCheck.value ? { organizationSnapshot: orgSnapCheck.value } : {}),
     });
   }
 
@@ -1064,8 +1107,17 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
       }
     }
 
+    const sessionOrgCheck = validateOrganizationSettingsValue(
+      s.organizationSnapshot,
+      `${ctx} -> organizationSnapshot`
+    );
+    if (!sessionOrgCheck.ok) return sessionOrgCheck;
+
     sessionIds.add(s.id);
-    auditSessions.push(s as unknown as AuditSession);
+    auditSessions.push({
+      ...(s as unknown as AuditSession),
+      ...(sessionOrgCheck.value ? { organizationSnapshot: sessionOrgCheck.value } : {}),
+    });
   }
 
   // 10. AuthSettings tikrinimas (jei yra)
@@ -1086,6 +1138,14 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
     }
     authSettings = as as unknown as AuthSettings;
   }
+
+  // 10b. Įstaigos rekvizitai (jei trūksta senoje kopijoje – priskiriami numatytieji)
+  const orgCheck = validateOrganizationSettingsValue(raw.organizationSettings, 'organizationSettings');
+  if (!orgCheck.ok) {
+    return orgCheck;
+  }
+  const organizationSettings =
+    orgCheck.value ?? cloneOrganizationSettings(DEFAULT_ORGANIZATION_SETTINGS);
 
   // 11. Nuotraukų paketas atsarginėje kopijoje (jei yra)
   let photos: Record<string, string> | undefined;
@@ -1124,6 +1184,7 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
       writeOffActs,
       auditSessions,
       ...(authSettings ? { authSettings } : {}),
+      ...(organizationSettings ? { organizationSettings } : {}),
       ...(photos ? { photos } : {}),
     },
   };

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Trash2, AlertTriangle, FileText } from 'lucide-react';
-import { InventoryItem, WriteOffAct } from '../types/inventory';
+import { InventoryItem, WriteOffAct, ASSET_CLASS_SHORT_LABELS } from '../types/inventory';
+import { resolveAssetClass } from '../utils/accountingUtils';
 
 interface WriteOffModalProps {
   isOpen: boolean;
@@ -102,7 +103,7 @@ export const WriteOffModal: React.FC<WriteOffModalProps> = ({
               <div className="text-slate-600 flex justify-between font-medium">
                 <span>Įsigijimo vertė: <strong>{item.purchasePrice.toFixed(2)} €</strong></span>
                 <span className="text-blue-700 font-semibold">
-                  {item.purchasePrice >= 750 ? 'IMT (≥750€)' : 'TMT (<750€)'}
+                  {ASSET_CLASS_SHORT_LABELS[resolveAssetClass(item)]}
                 </span>
               </div>
             </div>

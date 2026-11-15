@@ -1,16 +1,19 @@
 import { InventoryItem, WriteOffAct } from '../types/inventory';
+import { getCalendarYearFromDate, getCurrentYearVilnius } from './dateUtils';
 
 export function getWriteOffActYear(act: WriteOffAct): number {
   if (typeof act.actYear === 'number' && Number.isFinite(act.actYear)) {
     return act.actYear;
   }
-  if (act.approvedDate && /^\d{4}/.test(act.approvedDate)) {
-    return Number(act.approvedDate.slice(0, 4));
+  const approvedYear = getCalendarYearFromDate(act.approvedDate);
+  if (approvedYear !== undefined) {
+    return approvedYear;
   }
-  if (act.date && /^\d{4}/.test(act.date)) {
-    return Number(act.date.slice(0, 4));
+  const dateYear = getCalendarYearFromDate(act.date);
+  if (dateYear !== undefined) {
+    return dateYear;
   }
-  return new Date().getFullYear();
+  return getCurrentYearVilnius();
 }
 
 export function filterWriteOffActsByYear(
@@ -43,7 +46,7 @@ export function isWriteOffActNumberUnique(
 
 export function generateNextWriteOffActNumber(
   acts: WriteOffAct[],
-  year: number = new Date().getFullYear()
+  year: number = getCurrentYearVilnius()
 ): string {
   const prefix = `NUR-${year}-`;
   let maxSeq = 0;

@@ -254,6 +254,14 @@ export interface WriteOffRejectedItemRecord {
   rejectionReason: string;
 }
 
+export interface OrganizationSettings {
+  name: string;
+  code: string;
+  address: string;
+  directorTitle: string;
+  directorName?: string;
+}
+
 export interface WriteOffAct {
   id: string;
   actNumber: string; // e.g. NUR-2026-004
@@ -269,6 +277,7 @@ export interface WriteOffAct {
   approvedDate?: string;
   approvedByUserId?: string;
   approvedByUserName?: string;
+  organizationSnapshot?: OrganizationSettings;
 }
 
 export interface TransferAct {
@@ -379,6 +388,7 @@ export interface AuditSession {
   checkRecords?: Record<string, AuditCheckRecord>; // Atskiri patikrinimų įrašai pagal itemId
   completionSummary?: AuditCompletionSummary;
   notes?: string;
+  organizationSnapshot?: OrganizationSettings;
 }
 
 export interface AuditScanLog {

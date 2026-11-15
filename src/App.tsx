@@ -34,9 +34,11 @@ import {
   AuthSettings,
   DefectReport,
   ItemCondition,
+  OrganizationSettings,
   getUserAssignedRoomIds
 } from './types/inventory';
 import { StorageService, SyncState, DbMutation } from './utils/storage';
+import { getCurrentYearVilnius, getTodayVilniusDate } from './utils/dateUtils';
 
 function describePendingMutation(op: DbMutation): string {
   switch (op.type) {
@@ -74,6 +76,8 @@ function describePendingMutation(op: DbMutation): string {
       return `Inventorizacijos užbaigimas (${op.sessionId})`;
     case 'RELOCATE_AUDIT_ITEM':
       return `Turto perkėlimas inventorizacijoje (${op.itemId})`;
+    case 'UPDATE_ORGANIZATION_SETTINGS':
+      return 'Įstaigos rekvizitų atnaujinimas';
     default:
       return `Operacija ${op.type}`;
   }
@@ -90,6 +94,9 @@ export default function App() {
   const [auditSessions, setAuditSessions] = useState<AuditSession[]>(() => StorageService.getAuditSessions());
   const [activeUserId, setActiveUserId] = useState<string | null>(() => StorageService.getActiveUserId());
   const [authSettings, setAuthSettings] = useState<AuthSettings>(() => StorageService.getAuthSettings());
+  const [organizationSettings, setOrganizationSettings] = useState<OrganizationSettings>(() =>
+    StorageService.getOrganizationSettings()
+  );
   const [syncState, setSyncState] = useState<SyncState>(() => StorageService.getSyncState());
   const [actionError, setActionError] = useState<string | null>(null);
   const [pendingConfirmAction, setPendingConfirmAction] = useState<{
@@ -140,6 +147,7 @@ export default function App() {
     setAuditSessions(StorageService.getAuditSessions());
     setActiveUserId(StorageService.getActiveUserId());
     setAuthSettings(StorageService.getAuthSettings());
+    setOrganizationSettings(StorageService.getOrganizationSettings());
   }, []);
 
   // Subscribe to server sync status and authoritative/merged DB updates + read-only initial load
@@ -155,6 +163,9 @@ export default function App() {
       setAuditSessions(db.auditSessions);
       if (db.authSettings) {
         setAuthSettings(db.authSettings);
+      }
+      if (db.organizationSettings) {
+        setOrganizationSettings(db.organizationSettings);
       }
     });
 
@@ -251,6 +262,13 @@ export default function App() {
     void runMutation({ type: 'UPDATE_AUTH_SETTINGS', authSettings: newSettings });
   };
 
+  const handleUpdateOrganizationSettings = (newOrgSettings: OrganizationSettings) => {
+    void runMutation({
+      type: 'UPDATE_ORGANIZATION_SETTINGS',
+      organizationSettings: newOrgSettings,
+    });
+  };
+
   const handleLoginSuccess = (user: User) => {
     setActiveUserId(user.id);
     StorageService.setActiveUserId(user.id);
@@ -341,19 +359,24 @@ export default function App() {
     notes: string,
     targetActId?: string
   ) => {
-    const currentYear = new Date().getFullYear();
+    const currentYear = getCurrentYearVilnius();
+    const fallbackChair =
+      activeAuditSession?.committeeChairman?.trim() ||
+      (currentUser
+        ? `${currentUser.fullName} (${currentUser.roleTitle})`
+        : 'Komisijos pirmininkas (nenurodyta)');
+    const fallbackMembers =
+      activeAuditSession?.committeeMembers && activeAuditSession.committeeMembers.length > 0
+        ? activeAuditSession.committeeMembers
+        : [];
     const newAct: WriteOffAct = {
       id: targetActId || `act-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       actNumber: '',
-      date: new Date().toISOString().slice(0, 10),
+      date: getTodayVilniusDate(),
       actYear: currentYear,
       status: 'draft',
-      committeeChair:
-        activeAuditSession?.committeeChairman || 'Kęstutis Labanauskas (Ūkio dalies vedėjas / IT)',
-      committeeMembers:
-        activeAuditSession?.committeeMembers && activeAuditSession.committeeMembers.length > 0
-          ? activeAuditSession.committeeMembers
-          : ['Sigita Navickienė (Direktoriaus pavaduotoja)'],
+      committeeChair: fallbackChair,
+      committeeMembers: fallbackMembers,
       reasonCategory,
       notes,
       items: [
@@ -480,7 +503,7 @@ export default function App() {
       type: 'RELOCATE_AUDIT_ITEM',
       itemId,
       newRoomId,
-      auditDate: new Date().toISOString().slice(0, 10),
+      auditDate: getTodayVilniusDate(),
       ...(sessionId ? { sessionId } : {}),
       transferredByUserId: currentUser?.id,
       transferredByUserName: currentUser?.fullName || 'Komisijos narys',
@@ -491,7 +514,7 @@ export default function App() {
 
   // Defect / Fault Report Handler from teachers or staff
   const handleSaveFaultReport = (itemToSave: InventoryItem, defectReport: DefectReport) => {
-    const defectNote = `[Gedimas ${new Date().toLocaleDateString('lt-LT')}]: ${defectReport.description}`;
+    const defectNote = `[Gedimas ${getTodayVilniusDate()}]: ${defectReport.description}`;
     const newCondition: ItemCondition =
       itemToSave.condition === 'new' ? 'fair' : itemToSave.condition === 'good' ? 'fair' : 'poor';
     void runMutation({
@@ -540,11 +563,11 @@ export default function App() {
   // Approve single item write-off (server delegates to whole-act approval and blocks partial approval)
   const handleApproveItemWriteOff = (
     item: InventoryItem,
-    approvalYear: number = new Date().getFullYear(),
+    approvalYear: number = getCurrentYearVilnius(),
     customActNumber?: string
   ) => {
     const actNum = customActNumber?.trim() || item.writeOffActNumber || '';
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getTodayVilniusDate();
     void runMutation({
       type: 'APPROVE_ITEM_WRITEOFF',
       itemId: item.id,
@@ -595,10 +618,10 @@ export default function App() {
   // Approve entire write-off act atomically
   const handleApproveWriteOffAct = (
     actId: string,
-    approvalYear: number = new Date().getFullYear(),
+    approvalYear: number = getCurrentYearVilnius(),
     customActNumber?: string
   ) => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getTodayVilniusDate();
     void runMutation({
       type: 'APPROVE_WRITEOFF_ACT',
       actId,
@@ -642,7 +665,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `tryskiu-mokykla-inventorius-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `tryskiu-mokykla-inventorius-${getTodayVilniusDate()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -690,7 +713,7 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-slate-100 text-slate-900 font-sans">
+    <div className="flex h-screen w-screen overflow-hidden bg-slate-100 text-slate-900 font-sans app-print-shell">
       {/* Sidebar Navigation */}
       <Sidebar
         currentTab={currentTab}
@@ -705,7 +728,7 @@ export default function App() {
       />
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden bg-slate-100">
+      <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden bg-slate-100 app-print-main-col">
         {/* Top Header */}
         <Header
           currentTab={currentTab}
@@ -733,7 +756,7 @@ export default function App() {
         />
 
         {/* View Content Viewport */}
-        <main className="flex-1 overflow-y-auto p-6 md:p-8 bg-slate-100/90">
+        <main className="flex-1 overflow-y-auto p-6 md:p-8 bg-slate-100/90 app-print-viewport">
           <div className="max-w-7xl mx-auto">
             {/* Sync / Conflict / Error / Local Preview / Blocked Ops Alert Banners */}
             {(actionError ||
@@ -1013,6 +1036,7 @@ export default function App() {
                 rooms={rooms}
                 users={users}
                 currentUser={currentUser}
+                organizationSettings={organizationSettings}
                 onOpenTransferModal={() => {
                   setTransferTargetItem(null);
                   setIsTransferModalOpen(true);
@@ -1027,6 +1051,7 @@ export default function App() {
                 rooms={rooms}
                 users={users}
                 auditSessions={auditSessions}
+                organizationSettings={organizationSettings}
                 currentUser={currentUser}
                 onCreateAuditSession={handleCreateAuditSession}
                 onUpdateAuditSessionSettings={handleUpdateAuditSessionSettings}
@@ -1053,10 +1078,13 @@ export default function App() {
                 rooms={rooms}
                 users={users}
                 writeOffActs={writeOffActs}
+                auditSessions={auditSessions}
+                organizationSettings={organizationSettings}
                 currentUser={currentUser}
                 onExportCSV={handleExportCSV}
                 onSaveWriteOffAct={handleSaveWriteOffAct}
                 onApproveWriteOffAct={handleApproveWriteOffAct}
+                onUpdateOrganizationSettings={handleUpdateOrganizationSettings}
                 onReconcileWriteOffIssue={handleReconcileWriteOffIssue}
               />
             )}

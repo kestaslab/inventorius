@@ -27,6 +27,7 @@ import {
   Room,
   AuditSession,
   AuditCheckMethod,
+  OrganizationSettings,
   User,
   formatRoomName,
 } from '../types/inventory';
@@ -39,6 +40,9 @@ import {
   evaluateItemAuditScope,
   getEffectiveSessionRows,
 } from '../utils/auditUtils';
+import { formatMoneyFixed } from '../utils/accountingUtils';
+import { getCalendarDatePart, getCurrentYearVilnius, getTodayVilniusDate } from '../utils/dateUtils';
+import { resolveOrganizationForDocument } from '../utils/organization';
 
 export interface AuditActionResult {
   ok: boolean;
@@ -51,6 +55,7 @@ interface AuditViewProps {
   rooms: Room[];
   users: User[];
   auditSessions: AuditSession[];
+  organizationSettings?: OrganizationSettings;
   currentUser: User;
   onCreateAuditSession: (session: {
     id: string;
@@ -117,6 +122,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
   rooms,
   users,
   auditSessions,
+  organizationSettings,
   currentUser,
   onCreateAuditSession,
   onUpdateAuditSessionSettings,
@@ -175,7 +181,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
 
   // Nustatymų / naujos sesijos formos būsena
   const [formTitle, setFormTitle] = useState('');
-  const [formYear, setFormYear] = useState<number>(new Date().getFullYear());
+  const [formYear, setFormYear] = useState<number>(getCurrentYearVilnius());
   const [formScopeDeptId, setFormScopeDeptId] = useState<string>('all');
   const [formIncludeInRepair, setFormIncludeInRepair] = useState<boolean>(true);
   const [formIncludeToWriteOff, setFormIncludeToWriteOff] = useState<boolean>(true);
@@ -184,7 +190,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
   const [formMemberNames, setFormMemberNames] = useState<string[]>([]);
   const [newMemberInput, setNewMemberInput] = useState('');
   const [formOrderNumber, setFormOrderNumber] = useState('V-14');
-  const [formOrderDate, setFormOrderDate] = useState(new Date().toISOString().split('T')[0]);
+  const [formOrderDate, setFormOrderDate] = useState(getTodayVilniusDate());
   const [formNotes, setFormNotes] = useState('');
   const [completionNotes, setCompletionNotes] = useState('');
 
@@ -590,7 +596,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
 
   // Atidaryti naujos sesijos kūrimo modalą
   const openCreateSessionModal = () => {
-    const year = new Date().getFullYear();
+    const year = getCurrentYearVilnius();
     const defaultChair =
       users.find((u) => !u.isArchived && u.isActive !== false && u.role === 'admin') ||
       users.find((u) => !u.isArchived && u.isActive !== false) ||
@@ -610,8 +616,8 @@ export const AuditView: React.FC<AuditViewProps> = ({
         ? selectedSession.committeeMembers
         : []
     );
-    setFormOrderNumber(selectedSession?.orderNumber || 'V-14');
-    setFormOrderDate(new Date().toISOString().split('T')[0]);
+    setFormOrderNumber(selectedSession?.orderNumber || '');
+    setFormOrderDate(getTodayVilniusDate());
     setFormNotes('');
     setNewMemberInput('');
     setIsCreateModalOpen(true);
@@ -622,8 +628,8 @@ export const AuditView: React.FC<AuditViewProps> = ({
     setModalError(null);
     setFormTitle(selectedSession.title);
     setFormYear(selectedSession.year);
-    setFormOrderNumber(selectedSession.orderNumber || 'V-14');
-    setFormOrderDate(selectedSession.orderDate || new Date().toISOString().split('T')[0]);
+    setFormOrderNumber(selectedSession.orderNumber || '');
+    setFormOrderDate(selectedSession.orderDate || getTodayVilniusDate());
     const currentChair =
       selectedSession.committeeChairman || `${currentUser.fullName} (Komisijos pirmininkas)`;
     setFormCustomChairman(currentChair);
@@ -657,7 +663,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
         id: newSessionId,
         year: formYear,
         title: formTitle.trim(),
-        startDate: new Date().toISOString().slice(0, 10),
+        startDate: getTodayVilniusDate(),
         ...(formScopeDeptId !== 'all' ? { departmentId: formScopeDeptId } : {}),
         includeInRepair: formIncludeInRepair,
         includeToWriteOff: formIncludeToWriteOff,
@@ -718,7 +724,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
     try {
       const res = await onCompleteAuditSession({
         sessionId: selectedSession.id,
-        completedDate: new Date().toISOString().slice(0, 10),
+        completedDate: getTodayVilniusDate(),
         notes: completionNotes.trim() || selectedSession.notes,
       });
       if (res.ok) {
@@ -1053,7 +1059,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
                 <input
                   type="number"
                   value={formYear}
-                  onChange={(e) => setFormYear(parseInt(e.target.value, 10) || new Date().getFullYear())}
+                  onChange={(e) => setFormYear(parseInt(e.target.value, 10) || getCurrentYearVilnius())}
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono"
                 />
               </div>
@@ -1129,8 +1135,15 @@ export const AuditView: React.FC<AuditViewProps> = ({
     );
   }
 
+  const resolvedPrintOrg = resolveOrganizationForDocument(
+    selectedSession.organizationSnapshot,
+    organizationSettings,
+    selectedSession.status === 'completed'
+  );
+
   return (
     <div className="space-y-6">
+      <div className={isPrintModalOpen ? 'space-y-6 no-print' : 'space-y-6'}>
       {/* Sesijų perjungiklis ir kūrimas */}
       <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2.5">
@@ -1879,7 +1892,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
                   <input
                     type="number"
                     value={formYear}
-                    onChange={(e) => setFormYear(parseInt(e.target.value, 10) || new Date().getFullYear())}
+                    onChange={(e) => setFormYear(parseInt(e.target.value, 10) || getCurrentYearVilnius())}
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono"
                   />
                 </div>
@@ -1995,11 +2008,13 @@ export const AuditView: React.FC<AuditViewProps> = ({
         </div>
       )}
 
+      </div>
+
       {/* A4 Oficialus apyrašo spausdinimo modalas */}
       {isPrintModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-2 sm:p-4 backdrop-blur-2xs overflow-y-auto">
-          <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[94vh] flex flex-col overflow-hidden border border-slate-300">
-            <div className="px-6 py-3.5 bg-slate-900 text-white flex items-center justify-between shrink-0 print:hidden">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-2 sm:p-4 backdrop-blur-2xs overflow-y-auto print-modal-backdrop">
+          <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[94vh] flex flex-col overflow-hidden border border-slate-300 print-modal-container">
+            <div className="px-6 py-3.5 bg-slate-900 text-white flex items-center justify-between shrink-0 no-print print:hidden">
               <div className="flex items-center gap-2">
                 <Printer className="w-4 h-4 text-blue-400" />
                 <span className="text-sm font-bold">Oficialus inventorizacijos apyrašas (A4)</span>
@@ -2028,13 +2043,14 @@ export const AuditView: React.FC<AuditViewProps> = ({
               </div>
             </div>
 
-            <div className="p-8 sm:p-10 overflow-y-auto flex-1 font-serif text-slate-900 text-xs bg-white print:p-0">
+            <div className="p-8 sm:p-10 overflow-y-auto flex-1 font-serif text-slate-900 text-xs bg-white print:p-0 print-sheet-scroller">
+              <div className="print-sheet">
               <div className="text-center space-y-1 mb-6 border-b pb-4 border-slate-300">
                 <p className="font-bold text-sm tracking-wide uppercase">
-                  Telšių raj. Tryškių Lazdynų Pelėdos gimnazija
+                  {resolvedPrintOrg.organization.name}
                 </p>
                 <p className="text-[11px] text-slate-600">
-                  Įmonės kodas: 190558117 · Lazdynų Pelėdos g. 20, Tryškiai, Telšių r.
+                  Juridinio asmens kodas: {resolvedPrintOrg.organization.code} · {resolvedPrintOrg.organization.address}
                 </p>
                 <h1 className="text-base font-bold uppercase mt-4 tracking-wider">
                   MATERIALIOJO TURTO INVENTORIZACIJOS APYRAŠAS
@@ -2043,7 +2059,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
                 <p className="text-xs font-sans mt-1">
                   Sesijos pradžia: {selectedSession.startDate}
                   {selectedSession.completedDate ? ` · Užbaigta: ${selectedSession.completedDate}` : ''} ·
-                  Pagal įsakymą Nr. {selectedSession.orderNumber || '—'} ({selectedSession.orderDate || '—'})
+                  Pagal įsakymą Nr. {selectedSession.orderNumber || 'Nenurodyta'} ({selectedSession.orderDate || 'Nenurodyta'})
                 </p>
                 <p className="text-xs font-sans font-semibold text-slate-700">
                   Padalinys / skyrius:{' '}
@@ -2116,14 +2132,14 @@ export const AuditView: React.FC<AuditViewProps> = ({
                             {row.responsibleUserName}
                           </td>
                           <td className="border border-slate-300 p-1.5 text-right font-mono tabular-nums">
-                            {row.purchasePrice.toFixed(2)}
+                            {formatMoneyFixed(row.purchasePrice)}
                           </td>
                           <td className="border border-slate-300 p-1.5 text-center font-semibold">
                             {row.auditState === 'found' ? (
-                              <span className="text-emerald-700">Rasta vietoje</span>
+                              <span className="text-emerald-700">Rastas vietoje</span>
                             ) : row.auditState === 'found_elsewhere' ? (
                               <span className="text-amber-800">
-                                Rasta kitur ({rec?.actualRoomName || 'kita patalpa'})
+                                Rastas kitur ({rec?.actualRoomName || 'kita patalpa'})
                               </span>
                             ) : row.auditState === 'missing' ? (
                               <span className="text-rose-700">Trūksta</span>
@@ -2133,7 +2149,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
                           </td>
                           <td className="border border-slate-300 p-1.5 text-[10px] text-slate-600">
                             {rec
-                              ? `${rec.checkedByUserName}, ${METHOD_LABELS[rec.method]} (${rec.checkedAt.slice(0, 10)})`
+                              ? `${rec.checkedByUserName}, ${METHOD_LABELS[rec.method]} (${getCalendarDatePart(rec.checkedAt)})`
                               : row.notes || '—'}
                           </td>
                         </tr>
@@ -2199,11 +2215,11 @@ export const AuditView: React.FC<AuditViewProps> = ({
                               {row.responsibleUserName}
                             </td>
                             <td className="border border-slate-300 p-1.5 text-right font-mono tabular-nums">
-                              {row.purchasePrice.toFixed(2)}
+                              {formatMoneyFixed(row.purchasePrice)}
                             </td>
                             <td className="border border-slate-300 p-1.5 text-[10px] text-slate-600">
                               {rec
-                                ? `${rec.checkedByUserName}, ${METHOD_LABELS[rec.method]} (${rec.checkedAt.slice(0, 10)})`
+                                ? `${rec.checkedByUserName}, ${METHOD_LABELS[rec.method]} (${getCalendarDatePart(rec.checkedAt)})`
                                 : row.notes || '—'}
                             </td>
                           </tr>
@@ -2251,7 +2267,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
                 );
               })()}
 
-              <div className="mt-10 pt-6 border-t border-slate-300 space-y-6 font-sans">
+              <div className="mt-10 pt-6 border-t border-slate-300 space-y-6 font-sans print-avoid-break">
                 <div className="flex justify-between items-end">
                   <div>
                     <span className="text-slate-600 block text-[11px]">Komisijos pirmininkas:</span>
@@ -2273,6 +2289,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
                     </div>
                   </div>
                 ))}
+              </div>
               </div>
             </div>
           </div>

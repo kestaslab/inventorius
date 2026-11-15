@@ -10,7 +10,15 @@ import {
   Building,
   UserCheck
 } from 'lucide-react';
-import { MovementRecord, Department, Room, User, formatRoomName } from '../types/inventory';
+import {
+  MovementRecord,
+  Department,
+  Room,
+  User,
+  OrganizationSettings,
+  formatRoomName,
+} from '../types/inventory';
+import { cloneOrganizationSettings } from '../utils/organization';
 
 interface MovementsViewProps {
   movements: MovementRecord[];
@@ -18,6 +26,7 @@ interface MovementsViewProps {
   rooms: Room[];
   users: User[];
   currentUser: User;
+  organizationSettings?: OrganizationSettings;
   onOpenTransferModal: () => void;
 }
 
@@ -27,10 +36,12 @@ export const MovementsView: React.FC<MovementsViewProps> = ({
   rooms,
   users,
   currentUser,
+  organizationSettings,
   onOpenTransferModal,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedAct, setSelectedAct] = useState<MovementRecord | null>(null);
+  const org = cloneOrganizationSettings(organizationSettings);
 
   const filteredMovements = movements.filter(m => {
     if (!searchTerm) return true;
@@ -51,6 +62,7 @@ export const MovementsView: React.FC<MovementsViewProps> = ({
 
   return (
     <div className="space-y-6">
+      <div className={selectedAct ? 'space-y-6 no-print' : 'space-y-6'}>
       {/* Top Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
@@ -161,11 +173,12 @@ export const MovementsView: React.FC<MovementsViewProps> = ({
           </table>
         </div>
       </div>
+      </div>
 
       {/* Official Transfer Act Modal (Printable) */}
       {selectedAct && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 overflow-y-auto">
-          <div className="bg-white rounded-lg shadow-2xl max-w-2xl w-full p-8 my-8 print-sheet relative">
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 overflow-y-auto print-modal-backdrop">
+          <div className="bg-white rounded-lg shadow-2xl max-w-2xl w-full p-8 my-8 print-sheet print-modal-container relative">
             {/* Modal Controls (Hidden in print) */}
             <div className="flex items-center justify-between pb-4 border-b border-slate-100 mb-6 no-print">
               <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
@@ -191,10 +204,10 @@ export const MovementsView: React.FC<MovementsViewProps> = ({
             {/* Document Header */}
             <div className="text-center space-y-1 mb-8">
               <div className="text-sm font-bold uppercase tracking-wide text-slate-900">
-                TELŠIŲ RAJ. TRYŠKIŲ LAZDYNYŲ PELĖDOS GIMNAZIJA
+                {org.name}
               </div>
               <div className="text-xs text-slate-500">
-                Įm. k. 190581452, Lazdynų Pelėdos g. 20, Tryškiai, Telšių r.
+                Juridinio asmens kodas: {org.code}, {org.address}
               </div>
               <div className="pt-4 text-base font-bold text-slate-900 tracking-tight">
                 MATERIALIOJO TURTO PERDAVIMO – PRIĖMIMO AKTAS
@@ -210,7 +223,7 @@ export const MovementsView: React.FC<MovementsViewProps> = ({
             {/* Document Body */}
             <div className="space-y-4 text-xs text-slate-800 leading-relaxed">
               <p>
-                Šiuo aktu patvirtinama, kad Telšių raj. Tryškių Lazdynų Pelėdos gimnazijoje atliktas materialiųjų vertybių perdavimas:
+                Šiuo aktu patvirtinama, kad įstaigoje ({org.name}) atliktas materialiųjų vertybių perdavimas:
               </p>
 
               <div className="bg-slate-50 p-3.5 rounded border border-slate-200 space-y-2">

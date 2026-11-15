@@ -56,13 +56,11 @@ import {
   analyzeWriteOffIntegrity,
   getWriteOffActYear,
 } from '../utils/writeOffUtils';
+import { resolveAssetClass, resolveFundingSource } from '../utils/accountingUtils';
+import { calculateCalendarAgeYears, getCurrentYearVilnius } from '../utils/dateUtils';
 
 export function calculateAgeInYears(acquisitionDate: string): number {
-  if (!acquisitionDate) return 0;
-  const acq = new Date(acquisitionDate).getTime();
-  const now = new Date().getTime();
-  const diffDays = (now - acq) / (1000 * 60 * 60 * 24);
-  return Math.max(0, diffDays / 365.25);
+  return calculateCalendarAgeYears(acquisitionDate);
 }
 
 export function formatAgeDisplay(acquisitionDate: string): { label: string; years: number; isOld: boolean } {
@@ -136,7 +134,7 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
 
   // Modal for approving write-off (whole linked act)
   const [approvalModalItem, setApprovalModalItem] = useState<InventoryItem | null>(null);
-  const [approvalYear, setApprovalYear] = useState<number>(new Date().getFullYear());
+  const [approvalYear, setApprovalYear] = useState<number>(getCurrentYearVilnius());
   const [approvalActNumber, setApprovalActNumber] = useState<string>('');
 
   // Modal for rejecting pending write-off
@@ -277,14 +275,12 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
 
       // Asset Class (IMT vs TMT)
       if (selectedAssetClass !== 'all') {
-        const itemClass = item.assetClass || (item.purchasePrice >= LONG_TERM_THRESHOLD ? 'long_term' : 'short_term');
-        if (itemClass !== selectedAssetClass) return false;
+        if (resolveAssetClass(item) !== selectedAssetClass) return false;
       }
 
       // Funding Origin (School, Municipality, Ministry, Projects, Donation)
       if (selectedFundingSource !== 'all') {
-        const itemOrigin = item.fundingSource || 'school';
-        if (itemOrigin !== selectedFundingSource) return false;
+        if (resolveFundingSource(item) !== selectedFundingSource) return false;
       }
 
       // Status (only in active tab)
@@ -397,7 +393,7 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
   }, [approvalModalItem, writeOffActs]);
 
   const approvalYearOptions = useMemo(() => {
-    const maxYear = new Date().getFullYear() + 1;
+    const maxYear = getCurrentYearVilnius() + 1;
     const minYear = 2020;
     const arr: number[] = [];
     for (let y = maxYear; y >= minYear; y--) arr.push(y);
@@ -412,7 +408,7 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
   const openApproveModal = (item: InventoryItem) => {
     const linked = findActiveDraftActForItem(writeOffActs, item);
     setApprovalModalItem(item);
-    setApprovalYear(linked ? getWriteOffActYear(linked) : item.writtenOffYear || new Date().getFullYear());
+    setApprovalYear(linked ? getWriteOffActYear(linked) : item.writtenOffYear || getCurrentYearVilnius());
     setApprovalActNumber(linked?.actNumber || item.writeOffActNumber || '');
   };
 

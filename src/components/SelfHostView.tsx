@@ -23,6 +23,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { StorageService, SyncState } from '../utils/storage';
+import { getTodayVilniusDate } from '../utils/dateUtils';
 import { User, InventoryItem, Room, MovementRecord, WriteOffAct } from '../types/inventory';
 
 interface SelfHostViewProps {
@@ -75,7 +76,7 @@ export const SelfHostView: React.FC<SelfHostViewProps> = ({
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `tryskiu-mokykla-inventorius-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = `tryskiu-mokykla-inventorius-backup-${getTodayVilniusDate()}.json`;
       a.click();
       URL.revokeObjectURL(url);
     } finally {

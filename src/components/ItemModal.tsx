@@ -36,6 +36,8 @@ import {
 } from '../types/inventory';
 import { StorageService } from '../utils/storage';
 import { compressPhoto } from '../utils/imageCompressor';
+import { resolveAssetClass } from '../utils/accountingUtils';
+import { getTodayVilniusDate } from '../utils/dateUtils';
 
 interface ItemModalProps {
   isOpen: boolean;
@@ -66,7 +68,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
     departmentId: departments[0]?.id || '',
     roomId: rooms[0]?.id || '',
     responsibleUserId: users[0]?.id || '',
-    acquisitionDate: new Date().toISOString().slice(0, 10),
+    acquisitionDate: getTodayVilniusDate(),
     purchasePrice: 100,
     residualValue: 100,
     assetClass: 'short_term',
@@ -101,9 +103,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
     if (editingItem) {
       setFormData({
         ...editingItem,
-        assetClass:
-          editingItem.assetClass ||
-          (Number(editingItem.purchasePrice) >= LONG_TERM_THRESHOLD ? 'long_term' : 'short_term'),
+        assetClass: resolveAssetClass(editingItem),
         fundingSource: editingItem.fundingSource || 'school',
       });
       setResidualInput(
@@ -130,7 +130,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
         departmentId: firstActiveDept?.id || '',
         roomId: firstActiveRoom?.id || '',
         responsibleUserId: firstActiveUser?.id || '',
-        acquisitionDate: new Date().toISOString().slice(0, 10),
+        acquisitionDate: getTodayVilniusDate(),
         purchasePrice: defaultPrice,
         residualValue: defaultPrice,
         assetClass: defaultPrice >= LONG_TERM_THRESHOLD ? 'long_term' : 'short_term',
@@ -265,7 +265,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
 
     // Validate date
     const acqDate = (formData.acquisitionDate || '').trim();
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = getTodayVilniusDate();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(acqDate)) {
       setValidationError('Įveskite teisingą įsigijimo datą (YYYY-MM-DD).');
       return;
@@ -800,7 +800,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
               <input
                 type="date"
                 required
-                max={new Date().toISOString().slice(0, 10)}
+                max={getTodayVilniusDate()}
                 value={formData.acquisitionDate}
                 onChange={(e) => setFormData({ ...formData, acquisitionDate: e.target.value })}
                 className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 focus:ring-1 focus:ring-blue-500"

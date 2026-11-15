@@ -7,6 +7,7 @@ import {
   WriteOffAct,
   AuditSession,
   AuthSettings,
+  OrganizationSettings,
   formatRoomName,
 } from '../types/inventory';
 import {
@@ -30,6 +31,10 @@ import {
   getTouchedEntityKeys,
   getOperationReferencedKeys,
 } from './dbOperations';
+import { DEFAULT_ORGANIZATION_SETTINGS, cloneOrganizationSettings } from './organization';
+import { resolveAssetClass } from './accountingUtils';
+import { buildCsvContent, formatCsvMoney, formatCsvOptionalMoney } from './csvUtils';
+import { getCurrentYearVilnius } from './dateUtils';
 
 export type { AppDatabase } from './databaseValidation';
 export type { DbMutation } from './dbOperations';
@@ -44,6 +49,7 @@ const STORAGE_KEYS = {
   AUDIT_SESSIONS: 'school_inv_audits_v1',
   ACTIVE_USER_ID: 'school_inv_active_user_v1',
   AUTH_SETTINGS: 'school_inv_auth_settings_v1',
+  ORG_SETTINGS: 'school_inv_org_settings_v1',
   SERVER_REVISION: 'school_inv_server_revision_v1',
   PENDING_OPS: 'school_inv_pending_ops_v1',
   LOCAL_PREVIEW: 'school_inv_local_preview_v1',
@@ -281,6 +287,11 @@ function persistSnapshotToLocalCache(db: AppDatabase, isServerAuthoritative: boo
   if (db.authSettings) {
     results.push(safeSetLocalStorage(STORAGE_KEYS.AUTH_SETTINGS, JSON.stringify(db.authSettings)));
   }
+  if (db.organizationSettings) {
+    results.push(
+      safeSetLocalStorage(STORAGE_KEYS.ORG_SETTINGS, JSON.stringify(db.organizationSettings))
+    );
+  }
 
   if (results.some((r) => !r.ok)) {
     cacheStorageWarning =
@@ -304,6 +315,7 @@ function buildDemoDatabase(): AppDatabase {
     writeOffActs: INITIAL_WRITEOFF_ACTS,
     auditSessions: [INITIAL_AUDIT_SESSION],
     authSettings: INITIAL_AUTH_SETTINGS,
+    organizationSettings: DEFAULT_ORGANIZATION_SETTINGS,
   };
 }
 
@@ -643,6 +655,7 @@ export const StorageService = {
       writeOffActs: this.getWriteOffActs(),
       auditSessions: this.getAuditSessions(),
       authSettings: this.getAuthSettings(),
+      organizationSettings: this.getOrganizationSettings(),
     };
   },
 
@@ -780,6 +793,19 @@ export const StorageService = {
       return JSON.parse(raw);
     } catch {
       return INITIAL_AUTH_SETTINGS;
+    }
+  },
+
+  getOrganizationSettings(): OrganizationSettings {
+    if (memoryDb?.organizationSettings) {
+      return cloneOrganizationSettings(memoryDb.organizationSettings);
+    }
+    const raw = safeGetLocalStorage(STORAGE_KEYS.ORG_SETTINGS);
+    if (!raw) return cloneOrganizationSettings(DEFAULT_ORGANIZATION_SETTINGS);
+    try {
+      return cloneOrganizationSettings(JSON.parse(raw));
+    } catch {
+      return cloneOrganizationSettings(DEFAULT_ORGANIZATION_SETTINGS);
     }
   },
 
@@ -1267,7 +1293,7 @@ export const StorageService = {
   },
 
   generateNextInventoryNumber(items: InventoryItem[]): string {
-    const currentYear = new Date().getFullYear();
+    const currentYear = getCurrentYearVilnius();
     const prefix = `TM-${currentYear}-`;
     const yearNumbers = items
       .map((i) => i.inventoryNumber)
@@ -1280,7 +1306,7 @@ export const StorageService = {
   },
 
   exportToCSV(items: InventoryItem[], departments: Department[], rooms: Room[], users: User[]): string {
-    const header = [
+    const headers = [
       'Inventorinis numeris',
       'Pavadinimas',
       'Turto grupė (IMT/TMT)',
@@ -1292,6 +1318,7 @@ export const StorageService = {
       'Atsakingas asmuo',
       'Įsigijimo data',
       'Įsigijimo kaina (€)',
+      'Likutinė vertė (€)',
       'Būsena',
       'Būklė',
       'IT Įrenginio tipas',
@@ -1301,7 +1328,7 @@ export const StorageService = {
       'Operacinė sistema (OS)',
       'MAC adresas',
       'Pastabos',
-    ].join(';');
+    ];
 
     const rows = items.map((item) => {
       const dept = departments.find((d) => d.id === item.departmentId)?.name || '';
@@ -1310,7 +1337,7 @@ export const StorageService = {
       const user = users.find((u) => u.id === item.responsibleUserId)?.fullName || '';
 
       const assetClassStr =
-        item.assetClass === 'long_term' || item.purchasePrice >= 750
+        resolveAssetClass(item) === 'long_term'
           ? 'Ilgalaikis (IMT ≥ 750 €)'
           : 'Trumpalaikis / Mažavertis (< 750 €)';
 
@@ -1341,7 +1368,7 @@ export const StorageService = {
           ? 'Gera'
           : item.condition === 'fair'
           ? 'Patenkinama'
-          : 'Bloga';
+          : 'Prasta';
 
       const compType = item.specs?.computerType
         ? item.specs.computerType === 'laptop'
@@ -1356,29 +1383,30 @@ export const StorageService = {
         : '';
 
       return [
-        `"${item.inventoryNumber}"`,
-        `"${item.name.replace(/"/g, '""')}"`,
-        `"${assetClassStr}"`,
-        `"${fundingStr}"`,
-        `"${item.category}"`,
-        `"${item.serialNumber || ''}"`,
-        `"${dept}"`,
-        `"${roomStr}"`,
-        `"${user}"`,
-        `"${item.acquisitionDate}"`,
-        item.purchasePrice.toFixed(2).replace('.', ','),
-        `"${statusLt}"`,
-        `"${conditionLt}"`,
-        `"${compType}"`,
-        `"${item.specs?.cpu || ''}"`,
-        item.specs?.ramGb ? `${item.specs.ramGb}` : '',
-        `"${item.specs?.storage || ''}"`,
-        `"${item.specs?.os || ''}"`,
-        `"${item.specs?.macAddress || ''}"`,
-        `"${(item.notes || '').replace(/"/g, '""')}"`,
-      ].join(';');
+        item.inventoryNumber,
+        item.name,
+        assetClassStr,
+        fundingStr,
+        item.category,
+        item.serialNumber || '',
+        dept,
+        roomStr,
+        user,
+        item.acquisitionDate,
+        formatCsvMoney(item.purchasePrice),
+        formatCsvOptionalMoney(item.residualValue),
+        statusLt,
+        conditionLt,
+        compType,
+        item.specs?.cpu || '',
+        item.specs?.ramGb ?? '',
+        item.specs?.storage || '',
+        item.specs?.os || '',
+        item.specs?.macAddress || '',
+        item.notes || '',
+      ];
     });
 
-    return '\uFEFF' + [header, ...rows].join('\r\n');
+    return buildCsvContent(headers, rows, ';');
   },
 };

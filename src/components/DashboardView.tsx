@@ -23,6 +23,7 @@ import {
 } from '../types/inventory';
 import { NavigationTab } from './Sidebar';
 import { computeAuditStats, getEffectiveSessionRows } from '../utils/auditUtils';
+import { computeInventorySummary, formatMoneyLt } from '../utils/accountingUtils';
 
 interface DashboardViewProps {
   items: InventoryItem[];
@@ -49,14 +50,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onOpenAddItem,
   onOpenTransferModal,
 }) => {
-  // Calculations
-  const totalItems = items.length;
-  const activeItems = items.filter(i => i.status === 'active').length;
-  const inRepairItems = items.filter(i => i.status === 'in_repair').length;
-  const toWriteOffItems = items.filter(i => i.status === 'to_writeoff').length;
-  
-  const totalPurchaseValue = items.reduce((acc, i) => acc + (i.purchasePrice || 0), 0);
-  const totalResidualValue = items.reduce((acc, i) => acc + (i.residualValue || 0), 0);
+  // Unified accounting summary (excludes archived written-off assets from active school balance)
+  const summary = computeInventorySummary(items, departments, { includeWrittenOff: false });
+  const totalNonWrittenOffItems = summary.nonWrittenOffTotalCount;
+  const activeItems = summary.statusCounts.active;
+  const inRepairItems = summary.statusCounts.in_repair;
+  const toWriteOffItems = summary.statusCounts.to_writeoff;
+  const writtenOffItems = summary.statusCounts.written_off;
+
+  const totalPurchaseValue = summary.totalPurchaseValue;
+  const longTermValue = summary.longTerm.purchaseValue;
+  const shortTermValue = summary.shortTerm.purchaseValue;
 
   const auditRows = auditSession
     ? getEffectiveSessionRows(auditSession, items, departments, rooms, users, 'all')
@@ -66,38 +70,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const auditExpectedTotal = auditStats.total;
   const auditProgressPct = auditStats.progressPercent;
 
-  // Accounting classifications (VSAKIS 750 EUR threshold)
-  const longTermItems = items.filter(i => i.assetClass === 'long_term' || (i.purchasePrice >= 750 && i.assetClass !== 'short_term'));
-  const longTermValue = longTermItems.reduce((acc, i) => acc + (i.purchasePrice || 0), 0);
+  // Department distribution (non-written-off)
+  const deptStats = summary.departments.map((entry) => ({
+    department: entry.department,
+    itemsCount: entry.itemsCount,
+    roomsCount: rooms.filter((r) => r.departmentId === entry.department.id).length,
+    totalValue: entry.totalPurchaseValue,
+  }));
 
-  const shortTermItems = items.filter(i => i.assetClass === 'short_term' || (i.purchasePrice < 750 && i.assetClass !== 'long_term'));
-  const shortTermValue = shortTermItems.reduce((acc, i) => acc + (i.purchasePrice || 0), 0);
-
-  // Funding sources / Panauda
-  const municipalityItems = items.filter(i => i.fundingSource === 'municipality');
-  const municipalityValue = municipalityItems.reduce((acc, i) => acc + (i.purchasePrice || 0), 0);
-
-  const ministryItems = items.filter(i => i.fundingSource === 'ministry');
-  const ministryValue = ministryItems.reduce((acc, i) => acc + (i.purchasePrice || 0), 0);
-
-  const schoolItems = items.filter(i => !i.fundingSource || i.fundingSource === 'school');
-  const schoolValue = schoolItems.reduce((acc, i) => acc + (i.purchasePrice || 0), 0);
-
-  const projectItems = items.filter(i => i.fundingSource === 'project' || i.fundingSource === 'donation');
-  const projectValue = projectItems.reduce((acc, i) => acc + (i.purchasePrice || 0), 0);
-
-  // Department distribution
-  const deptStats = departments.map(dept => {
-    const deptItems = items.filter(i => i.departmentId === dept.id);
-    const deptRooms = rooms.filter(r => r.departmentId === dept.id);
-    const deptValue = deptItems.reduce((acc, i) => acc + (i.purchasePrice || 0), 0);
-    return {
-      department: dept,
-      itemsCount: deptItems.length,
-      roomsCount: deptRooms.length,
-      totalValue: deptValue,
-    };
-  });
+  const projectCombinedCount = summary.funding.project.count + summary.funding.donation.count;
+  const projectCombinedValue =
+    Math.round((summary.funding.project.purchaseValue + summary.funding.donation.purchaseValue) * 100) /
+    100;
 
   return (
     <div className="space-y-6">
@@ -141,7 +125,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
       {/* KPI Stats Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Total Items */}
+        {/* Total Non-Written-Off Items */}
         <div className="bg-white border border-slate-300 rounded-xl p-4 shadow-xs">
           <div className="flex items-center justify-between">
             <span className="text-xs text-slate-600 font-bold uppercase tracking-wider">Materialusis turtas</span>
@@ -149,14 +133,20 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
           <div className="mt-2 flex items-baseline gap-2">
             <span className="text-2xl font-extrabold font-mono tabular-nums text-slate-900">
-              {totalItems}
+              {totalNonWrittenOffItems}
             </span>
-            <span className="text-xs font-semibold text-slate-600">vnt.</span>
+            <span className="text-xs font-semibold text-slate-600">vnt. (nenurašyto)</span>
           </div>
           <div className="mt-1 text-xs text-slate-600 font-medium">
-            <span className="text-emerald-700 font-semibold">{activeItems} veikiantys</span>
+            <span className="text-emerald-700 font-semibold">{activeItems} aktyvūs</span>
             <span className="mx-1">·</span>
-            <span>{rooms.length} kabinetuose</span>
+            <span>{rooms.length} kab.</span>
+            {writtenOffItems > 0 && (
+              <>
+                <span className="mx-1">·</span>
+                <span className="text-purple-700">{writtenOffItems} archyve</span>
+              </>
+            )}
           </div>
         </div>
 
@@ -168,12 +158,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
           <div className="mt-2 flex items-baseline gap-1">
             <span className="text-2xl font-extrabold font-mono tabular-nums text-slate-900">
-              {totalPurchaseValue.toLocaleString('lt-LT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {formatMoneyLt(totalPurchaseValue, false)}
             </span>
             <span className="text-xs font-bold text-slate-600">€</span>
           </div>
           <div className="mt-1 text-xs text-slate-600 font-medium">
-            IMT (≥750€): <span className="font-mono tabular-nums font-bold text-slate-900">{longTermValue.toLocaleString('lt-LT', { minimumFractionDigits: 2 })} €</span>
+            IMT: <span className="font-mono tabular-nums font-bold text-slate-900">{formatMoneyLt(longTermValue)}</span>
+            {summary.residualSummary.knownCount > 0 && (
+              <span className="block text-[11px] text-slate-500 mt-0.5">
+                Likutinė ({summary.residualSummary.knownCount}/{summary.residualSummary.totalCount} vnt.):{' '}
+                <strong className="font-mono">{formatMoneyLt(summary.residualSummary.knownTotal)}</strong>
+              </span>
+            )}
           </div>
         </div>
 
@@ -225,14 +221,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
           </div>
           <div className="mt-1 text-xs text-slate-600 font-medium">
-            Nurašymų archyvas paruoštas
+            {writtenOffItems > 0 ? `Archyve nurašyta: ${writtenOffItems} vnt.` : 'Nurašymų archyvas tuščias'}
           </div>
         </div>
       </div>
 
       {/* Accounting Classification & Funding Origin (VSAKIS & Panauda) */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Card 1: IMT (>= 750 EUR) vs TMT (< 750 EUR) */}
+        {/* Card 1: IMT vs TMT */}
         <div className="bg-white border border-slate-300 rounded-xl p-5 shadow-xs">
           <div className="flex items-center justify-between pb-3 border-b border-slate-200">
             <div>
@@ -241,7 +237,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <span>Apskaitos klasifikacija (VSAKIS)</span>
               </h3>
               <p className="text-xs text-slate-500 mt-0.5 font-medium">
-                Ilgalaikis turtas (nuo 750 €) ir trumpalaikis / mažavertis inventorius
+                Ilgalaikis turtas (IMT) ir trumpalaikis / mažavertis inventorius (TMT)
               </p>
             </div>
             <button
@@ -255,37 +251,37 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <div className="grid grid-cols-2 gap-3 mt-4">
             <div className="bg-blue-50/70 border border-blue-200 rounded-lg p-3">
               <span className="text-[11px] font-semibold text-blue-900 block">
-                Ilgalaikis turtas (IMT ≥ 750 €)
+                Ilgalaikis turtas (IMT)
               </span>
               <div className="mt-2 flex items-baseline gap-1.5">
                 <span className="text-xl font-bold font-mono text-blue-950">
-                  {longTermItems.length}
+                  {summary.longTerm.count}
                 </span>
                 <span className="text-xs text-blue-800">vnt.</span>
               </div>
               <div className="mt-1 font-mono text-xs font-semibold text-blue-900">
-                {longTermValue.toLocaleString('lt-LT', { minimumFractionDigits: 2 })} €
+                {formatMoneyLt(longTermValue)}
               </div>
               <p className="text-[10px] text-blue-700 mt-1">
-                Dėvisi pagal nusidėvėjimo normas
+                Priskirtas IMT arba ≥ 750 € be klasės
               </p>
             </div>
 
             <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
               <span className="text-[11px] font-semibold text-slate-800 block">
-                Trumpalaikis / Mažavertis (&lt; 750 €)
+                Trumpalaikis / Mažavertis (TMT)
               </span>
               <div className="mt-2 flex items-baseline gap-1.5">
                 <span className="text-xl font-bold font-mono text-slate-900">
-                  {shortTermItems.length}
+                  {summary.shortTerm.count}
                 </span>
                 <span className="text-xs text-slate-600">vnt.</span>
               </div>
               <div className="mt-1 font-mono text-xs font-semibold text-slate-800">
-                {shortTermValue.toLocaleString('lt-LT', { minimumFractionDigits: 2 })} €
+                {formatMoneyLt(shortTermValue)}
               </div>
               <p className="text-[10px] text-slate-500 mt-1">
-                Ūkinis inventorius, nurašomas iškart
+                Priskirtas TMT arba &lt; 750 € be klasės
               </p>
             </div>
           </div>
@@ -312,8 +308,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <span className="text-[10px] text-amber-800 block">Telšių rajono savivaldybės perduotas turtas</span>
               </div>
               <div className="text-right font-mono">
-                <div className="font-extrabold text-amber-950">{municipalityItems.length} vnt.</div>
-                <div className="text-[11px] font-bold text-amber-900">{municipalityValue.toLocaleString('lt-LT', { minimumFractionDigits: 2 })} €</div>
+                <div className="font-extrabold text-amber-950">{summary.funding.municipality.count} vnt.</div>
+                <div className="text-[11px] font-bold text-amber-900">{formatMoneyLt(summary.funding.municipality.purchaseValue)}</div>
               </div>
             </div>
 
@@ -323,8 +319,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <span className="text-[10px] text-purple-800 block">Ministerijos centralizuotas aprūpinimas</span>
               </div>
               <div className="text-right font-mono">
-                <div className="font-extrabold text-purple-950">{ministryItems.length} vnt.</div>
-                <div className="text-[11px] font-bold text-purple-900">{ministryValue.toLocaleString('lt-LT', { minimumFractionDigits: 2 })} €</div>
+                <div className="font-extrabold text-purple-950">{summary.funding.ministry.count} vnt.</div>
+                <div className="text-[11px] font-bold text-purple-900">{formatMoneyLt(summary.funding.ministry.purchaseValue)}</div>
               </div>
             </div>
 
@@ -334,8 +330,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <span className="text-[10px] text-slate-600 block">Mokyklos tiesiogiai įsigytas inventorius</span>
               </div>
               <div className="text-right font-mono">
-                <div className="font-extrabold text-slate-900">{schoolItems.length} vnt.</div>
-                <div className="text-[11px] font-bold text-slate-700">{schoolValue.toLocaleString('lt-LT', { minimumFractionDigits: 2 })} €</div>
+                <div className="font-extrabold text-slate-900">{summary.funding.school.count} vnt.</div>
+                <div className="text-[11px] font-bold text-slate-700">{formatMoneyLt(summary.funding.school.purchaseValue)}</div>
               </div>
             </div>
 
@@ -345,8 +341,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <span className="text-[10px] text-emerald-800 block">STEAM, TŪM projektai ir kita kilmė</span>
               </div>
               <div className="text-right font-mono">
-                <div className="font-extrabold text-emerald-950">{projectItems.length} vnt.</div>
-                <div className="text-[11px] font-bold text-emerald-900">{projectValue.toLocaleString('lt-LT', { minimumFractionDigits: 2 })} €</div>
+                <div className="font-extrabold text-emerald-950">{projectCombinedCount} vnt.</div>
+                <div className="text-[11px] font-bold text-emerald-900">{formatMoneyLt(projectCombinedValue)}</div>
               </div>
             </div>
           </div>
@@ -399,7 +395,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     <span className="text-slate-600 font-medium">{roomsCount} kab.</span>
                   </div>
                   <div className="text-xs font-mono tabular-nums font-bold text-slate-900 min-w-20 text-right">
-                    {totalValue.toLocaleString('lt-LT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €
+                    {formatMoneyLt(totalValue)}
                   </div>
                 </div>
               </div>

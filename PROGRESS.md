@@ -72,13 +72,35 @@
   - **Nuoseklios apimties taisyklės (`src/utils/auditUtils.ts`, `src/utils/dbOperations.ts`, `src/components/AuditView.tsx`, `src/App.tsx`):** `RECORD_AUDIT_CHECK`, `MARK_AUDIT_ITEM_MISSING`, `RELOCATE_AUDIT_ITEM` ir UI skeneris nuosekliai naudoja `evaluateItemAuditScope`. Pradiniame `snapshotItems` sąraše buvęs turtas išlieka istorinėje apimtyje net vėliau pakeitus jo būseną; sąmoningai neįtraukto statuso (`in_repair`, `to_writeoff`) turtas be aiškaus vartotojo išimties patvirtinimo (`confirmExcludedStatus: true`) atmetamas su HTTP `400` ir niekada neįtraukiamas tyliai.
   - **Kameros asinchroninio paleidimo ir uždarymo valdymas (`src/utils/cameraController.ts`, `src/components/AuditCameraScanner.tsx`):** įdiegtas monotoninis `runId` valdiklis su aiškia gyvavimo ciklo kontrole (`start`/`stop`/`switchCamera`), todėl pavėluotas `getUserMedia` srautas ar klaida sustabdo tik savo pasenusį srautą ir niekada neperrašo naujesnės kameros būsenos; `enumerateDevices` nebesukelia perteklinio pakartotinio paleidimo; uždarius ar išmontavus kamerą sustabdomas srautas, `requestAnimationFrame` ir ignoruojami pavėluoti asinchroninio dekodavimo (`BarcodeDetector.detect`) rezultatai. (Fizinė mobiliojo telefono kamera realiame įrenginyje netestuota – patikrinta automatizuotais testais su imituotais `MediaStream`/`getUserMedia` objektais.)
 
+### 5 etapas – Ataskaitos ir suvestinės (Atlikta)
+- **Ataskaitų duomenų teisingumas (`src/utils/reportUtils.ts`, `src/components/ReportsView.tsx`):**
+  - Fizinės inventorizacijos apyrašas (`buildAuditSessionReportData`) griežtai atskirtas nuo dabartinio turto registro sąrašo (`buildRegistrySheetReportData`).
+  - Inventorizacijos ataskaitoje leidžiama pasirinkti sesiją; naudojami jos `snapshotItems` ir `checkRecords` (įskaitant papildomų radinių `itemSnapshot`).
+  - Tiksliai atvaizduojamos būsenos „Rastas vietoje“, „Rastas kitur (...)“, „Trūksta“ ir „Dar nepatikrinta“ – niekada nerodoma „Yra“ nepatikrintiems ar vien registro įrašams.
+  - Papildomi radiniai pateikiami atskiroje dalyje nuo pradinės sesijos apimties.
+  - Užbaigta inventorizacijos sesija ir patvirtintas nurašymo aktas išlieka nekintami vėliau redagavus ar ištrynus registro daiktus arba pakeitus įstaigos rekvizitus; senoms sesijoms/aktams be momentinės istorijos neišgalvojami duomenys ir rodomas aiškus įspėjimas apie ribotus istorinius duomenis.
+  - Peržiūra, spausdinimas, CSV ir DOCX eksportas naudoja vieną ir tą patį suvestą duomenų rinkinį (`ResolvedReportData`); esant tuščiam rezultatui rodoma aiški tuščia būsena, o spausdinimas ir eksportai išjungiami.
+- **Dokumentų rekvizitai (`src/types/inventory.ts`, `src/utils/organization.ts`, `src/utils/dbOperations.ts`, `src/components/ReportsView.tsx`, `src/App.tsx`):**
+  - Pašalinti visi priverstinai įrašyti dokumentų metai (`2026`), numeriai (`INV-2026/01`) ir išgalvotos komisijos pavardės iš ataskaitų bei nurašymo fallback kodo (`App.tsx`).
+  - Pridėti redaguojami įstaigos rekvizitai (`OrganizationSettings`, ištaisyta klaida `LAZDYNYŲ` -> `Lazdynų`, kodas `190558117`), išsaugomi per `UPDATE_ORGANIZATION_SETTINGS` mutaciją ir užšaldomi (`organizationSnapshot`) užbaigtose sesijose bei patvirtintuose nurašymo aktuose.
+  - Senos JSON kopijos be `organizationSettings` saugiai migruojamos su numatytaisiais įstaigos rekvizitais (`databaseValidation.ts`), neliečiant istorinių dokumentų momentinės istorijos.
+- **Tikras OOXML DOCX ir tvarkingas CSV (`src/utils/docxExport.ts`, `src/utils/csvUtils.ts`, `src/utils/storage.ts`):**
+  - Vietoj HTML `.doc` surogato sukurtas tikras `.docx` dokumentų generatorius su `docx` biblioteka (`Packer.toBlob` / `Packer.toBuffer`), pasikartojančiomis lentelių antraštėmis, `cantSplit` eilutėmis bei parašų blokais ir saugiu XML specialiųjų simbolių bei lietuviškų raidžių koduotės apdorojimu.
+  - Suvienodintas CSV eksportas (`buildCsvContent`, `encodeCsvField`) su UTF-8 BOM (`\uFEFF`), `;` skirtuku, `\r\n` eilučių pabaigomis, kabučių/naujų eilučių ekranavimu ir lietuvišku kableliniu pinigų formatavimu tiek ataskaitose, tiek `StorageService.exportToCSV`.
+- **Suvestinių, pinigų, datų ir filtrų nuoseklumas (`src/utils/accountingUtils.ts`, `src/utils/dateUtils.ts`, `src/components/DashboardView.tsx`, `src/components/InventoryListView.tsx`, `src/components/ItemModal.tsx`, `src/components/WriteOffModal.tsx`, `src/utils/writeOffUtils.ts`):**
+  - Suvienodinta IMT/TMT klasifikacija (`resolveAssetClass`: prioritetas `assetClass`, fallback `750 €`) ir bendra nenurašyto turto suvestinė (`computeInventorySummary`) tarp `DashboardView` ir `ReportsView`.
+  - Piniginės sumos skaičiuojamos sveikais centais (`toCents`, `sumMoney`, `fromCents`), o trūkstamos likutinės vertės skaičiuojamos skaidriai (`summarizeResidualValues`), niekada neprilyginant jų patvirtintam `0.00 €`.
+  - Kalendorinės `YYYY-MM-DD` datos ir laikai tvarkomi per `Europe/Vilnius` laiko juostos funkcijas (`dateUtils.ts`) be UTC paros poslinkio klaidų.
+- **A4 spausdinimo stiliai (`src/index.css`, `src/components/Sidebar.tsx`, `src/components/ReportsView.tsx`, `src/components/AuditView.tsx`, `src/components/MovementsView.tsx`):**
+  - Pritaikytos `@media print` A4 taisyklės, panaikinančios ekrano `h-screen overflow-hidden` ir modalų `max-h-[94vh]` apkarpymą, paslepiančios navigaciją/mygtukus/foninius elementus ir įgalinančios daugiapuslapį lentelių spausdinimą su pasikartojančiu `thead`. (Fizinis / naršyklės spausdinimo dialogo vaizdas nebuvo vizualiai tikrinamas, nes aplinkoje nėra įdiegto Chromium/Playwright.)
+
 ### Patikrų rezultatai
-- `tests/stage1-storage.test.ts`, `tests/stage2-editing-relations.test.ts`, `tests/stage3-writeoff-restore.test.ts`, `tests/stage3-queue-and-history.test.ts`, `tests/stage4-audit-qr.test.ts` – vykdomi su `npx tsx --test`.
+- `npx tsx --test tests/stage1-storage.test.ts tests/stage2-editing-relations.test.ts tests/stage3-writeoff-restore.test.ts tests/stage3-queue-and-history.test.ts tests/stage4-audit-qr.test.ts tests/stage5-reports-summaries.test.ts` – **34/34 testai sėkmingi**.
+- `npm run build` (`compile_applet`) ir `npm run lint` (`tsc --noEmit`) – sėkmingi be klaidų.
 
 ---
 
 ## Likę etapai
 
-- 5 – ataskaitos ir suvestinės
 - 6 – gedimai, etiketės ir darbuotojų importas
 - 7 – diegimas ir galutinė patikra
