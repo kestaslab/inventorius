@@ -25,10 +25,14 @@ import {
   Room, 
   User, 
   DefectReport, 
-  formatRoomName, 
-  getUserAssignedRoomIds 
+  formatRoomName 
 } from '../types/inventory';
 import { ReportFaultModal } from './ReportFaultModal';
+import {
+  getActiveDefects,
+  getMyInventorySummary,
+  getResolvedDefects,
+} from '../utils/defectUtils';
 
 interface MyInventoryViewProps {
   currentUser: User;
@@ -50,40 +54,29 @@ export const MyInventoryView: React.FC<MyInventoryViewProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedRoomFilter, setSelectedRoomFilter] = useState<string>('all');
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>('all');
-  
+  const [showWrittenOff, setShowWrittenOff] = useState(false);
+
   // Defect Modal State
   const [faultItem, setFaultItem] = useState<InventoryItem | null>(null);
 
-  // Determine all room IDs assigned to this user
-  const userRoomIds = useMemo(() => {
-    return getUserAssignedRoomIds(currentUser);
-  }, [currentUser]);
+  const summary = useMemo(
+    () => getMyInventorySummary(items, currentUser, rooms),
+    [items, currentUser, rooms]
+  );
 
-  // Find all rooms this user manages or is responsible for
-  const userRooms = useMemo(() => {
-    return rooms.filter(r => 
-      userRoomIds.includes(r.id) || 
-      r.defaultResponsiblePersonId === currentUser.id
-    );
-  }, [rooms, userRoomIds, currentUser.id]);
+  const userRooms = summary.userRooms;
+  const activeAssignedItems = summary.assignedItems;
+  const writtenOffItems = summary.writtenOffItems;
 
-  // All items assigned to the user directly OR located in their managed rooms
-  const myAllItems = useMemo(() => {
-    return items.filter(item => {
-      // 1. Personally responsible
-      if (item.responsibleUserId === currentUser.id) return true;
-      // 2. Located in one of user's managed rooms
-      if (item.roomId && userRoomIds.includes(item.roomId)) return true;
-      // 3. Or room's default responsible person is current user
-      const itemRoom = rooms.find(r => r.id === item.roomId);
-      if (itemRoom?.defaultResponsiblePersonId === currentUser.id) return true;
-      return false;
-    });
-  }, [items, currentUser.id, userRoomIds, rooms]);
+  const baseDisplayItems = useMemo(() => {
+    return showWrittenOff
+      ? [...activeAssignedItems, ...writtenOffItems]
+      : activeAssignedItems;
+  }, [showWrittenOff, activeAssignedItems, writtenOffItems]);
 
   // Filtered items based on user selection
   const filteredItems = useMemo(() => {
-    return myAllItems.filter(item => {
+    return baseDisplayItems.filter(item => {
       // Room filter
       if (selectedRoomFilter !== 'all' && item.roomId !== selectedRoomFilter) {
         return false;
@@ -103,27 +96,20 @@ export const MyInventoryView: React.FC<MyInventoryViewProps> = ({
       }
       return true;
     });
-  }, [myAllItems, selectedRoomFilter, selectedCategoryFilter, searchQuery]);
+  }, [baseDisplayItems, selectedRoomFilter, selectedCategoryFilter, searchQuery]);
 
-  // Categories available in user's inventory
+  // Categories available in user's visible inventory
   const availableCategories = useMemo(() => {
     const set = new Set<string>();
-    myAllItems.forEach(i => set.add(i.category));
+    baseDisplayItems.forEach(i => set.add(i.category));
     return Array.from(set);
-  }, [myAllItems]);
+  }, [baseDisplayItems]);
 
-  // Statistics
-  const totalValue = useMemo(() => {
-    return myAllItems.reduce((acc, i) => acc + (Number(i.purchasePrice) || 0), 0);
-  }, [myAllItems]);
-
-  const inRepairCount = useMemo(() => {
-    return myAllItems.filter(i => i.status === 'in_repair' || (i.defectReports && i.defectReports.length > 0)).length;
-  }, [myAllItems]);
-
-  const activeCount = useMemo(() => {
-    return myAllItems.filter(i => i.status === 'active').length;
-  }, [myAllItems]);
+  const totalValue = summary.totalPurchaseValue;
+  const inRepairCount = summary.inRepairItemsCount;
+  const activeDefectItemsCount = summary.activeDefectItemsCount;
+  const activeDefectReportsCount = summary.activeDefectReportsCount;
+  const activeCount = summary.operationalItemsCount;
 
   const faultItemRoom = rooms.find(r => r.id === faultItem?.roomId);
   const faultItemDept = departments.find(d => d.id === faultItem?.departmentId);
@@ -144,7 +130,7 @@ export const MyInventoryView: React.FC<MyInventoryViewProps> = ({
               </span>
             </div>
             <p className="text-xs text-slate-600">
-              Čia matomas Jūsų materialinei atsakomybei ir valdomoms patalpoms priskirtas gimnazijos turtas.
+              Čia matomas Jūsų materialinei atsakomybei ir valdomoms patalpoms priskirtas aktyvus gimnazijos turtas.
             </p>
           </div>
 
@@ -179,13 +165,14 @@ export const MyInventoryView: React.FC<MyInventoryViewProps> = ({
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-5 pt-4 border-t border-slate-200">
           <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
             <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
-              Priskirtas turtas
+              Priskirtas aktyvus turtas
             </span>
-            <div className="text-xl font-bold text-slate-900 mt-1">
-              {myAllItems.length} <span className="text-xs font-normal text-slate-500">vnt.</span>
+            <div className="text-xl font-bold text-slate-900 mt-1 font-mono tabular-nums">
+              {activeAssignedItems.length} <span className="text-xs font-normal font-sans text-slate-500">vnt.</span>
             </div>
-            <div className="text-[11px] text-slate-500 mt-0.5 font-mono">
+            <div className="text-[11px] text-slate-500 mt-0.5 font-mono tabular-nums">
               Bendra vertė: {totalValue.toLocaleString('lt-LT', { minimumFractionDigits: 2 })} €
+              {writtenOffItems.length > 0 ? ` · Archyve: ${writtenOffItems.length}` : ''}
             </div>
           </div>
 
@@ -193,8 +180,8 @@ export const MyInventoryView: React.FC<MyInventoryViewProps> = ({
             <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
               Valdomos patalpos
             </span>
-            <div className="text-xl font-bold text-slate-900 mt-1">
-              {userRooms.length} <span className="text-xs font-normal text-slate-500">kabinetai(-ų)</span>
+            <div className="text-xl font-bold text-slate-900 mt-1 font-mono tabular-nums">
+              {userRooms.length} <span className="text-xs font-normal font-sans text-slate-500">kabinetai(-ų)</span>
             </div>
             <div className="text-[11px] text-slate-500 mt-0.5 truncate">
               {userRooms.length > 0 ? userRooms.map(r => r.name).slice(0, 2).join(', ') + (userRooms.length > 2 ? '...' : '') : 'Nepriskirta'}
@@ -205,8 +192,8 @@ export const MyInventoryView: React.FC<MyInventoryViewProps> = ({
             <span className="text-[11px] font-semibold text-emerald-700 uppercase tracking-wider block">
               Tvarkingas / Veikiantis
             </span>
-            <div className="text-xl font-bold text-emerald-900 mt-1">
-              {activeCount} <span className="text-xs font-normal text-emerald-600">vnt.</span>
+            <div className="text-xl font-bold text-emerald-900 mt-1 font-mono tabular-nums">
+              {activeCount} <span className="text-xs font-normal font-sans text-emerald-600">vnt.</span>
             </div>
             <div className="text-[11px] text-emerald-700 mt-0.5">
               Paruošta ugdymo procesui
@@ -214,22 +201,24 @@ export const MyInventoryView: React.FC<MyInventoryViewProps> = ({
           </div>
 
           <div className={`rounded-lg p-3 border transition-colors ${
-            inRepairCount > 0 ? 'bg-amber-50 border-amber-300' : 'bg-slate-50 border-slate-200'
+            activeDefectItemsCount > 0 ? 'bg-amber-50 border-amber-300' : 'bg-slate-50 border-slate-200'
           }`}>
             <span className={`text-[11px] font-semibold uppercase tracking-wider block ${
-              inRepairCount > 0 ? 'text-amber-800' : 'text-slate-500'
+              activeDefectItemsCount > 0 ? 'text-amber-800' : 'text-slate-500'
             }`}>
-              Gedimai / Remontas
+              Aktyvūs gedimai / Remontas
             </span>
-            <div className={`text-xl font-bold mt-1 ${
-              inRepairCount > 0 ? 'text-amber-900' : 'text-slate-900'
+            <div className={`text-xl font-bold mt-1 font-mono tabular-nums ${
+              activeDefectItemsCount > 0 ? 'text-amber-900' : 'text-slate-900'
             }`}>
-              {inRepairCount} <span className="text-xs font-normal text-slate-500">vnt.</span>
+              {activeDefectItemsCount} <span className="text-xs font-normal font-sans text-slate-500">vnt.</span>
             </div>
             <div className={`text-[11px] mt-0.5 ${
-              inRepairCount > 0 ? 'text-amber-800 font-semibold' : 'text-slate-500'
+              activeDefectItemsCount > 0 ? 'text-amber-800 font-semibold' : 'text-slate-500'
             }`}>
-              {inRepairCount > 0 ? 'Reikalingas IT / ūkvedžio dėmesys' : 'Gedimų neužfiksuota'}
+              {activeDefectItemsCount > 0
+                ? `Remontuojami: ${inRepairCount} · Pranešimų: ${activeDefectReportsCount}`
+                : 'Aktyvių gedimų nėra'}
             </div>
           </div>
         </div>
@@ -258,7 +247,7 @@ export const MyInventoryView: React.FC<MyInventoryViewProps> = ({
               onChange={(e) => setSelectedRoomFilter(e.target.value)}
               className="text-xs bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 font-medium text-slate-700 cursor-pointer shadow-2xs"
             >
-              <option value="all">Visi kabinetai ({myAllItems.length})</option>
+              <option value="all">Visi kabinetai ({baseDisplayItems.length})</option>
               {userRooms.map(r => (
                 <option key={r.id} value={r.id}>{formatRoomName(r)}</option>
               ))}
@@ -276,6 +265,22 @@ export const MyInventoryView: React.FC<MyInventoryViewProps> = ({
                   <option key={cat} value={cat}>{cat}</option>
                 ))}
               </select>
+            )}
+
+            {writtenOffItems.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowWrittenOff(prev => !prev)}
+                className={`text-xs px-2.5 py-1.5 rounded-lg border font-medium transition-colors cursor-pointer ${
+                  showWrittenOff
+                    ? 'bg-purple-600 text-white border-purple-700 font-semibold'
+                    : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+                }`}
+              >
+                {showWrittenOff
+                  ? `Slėpti nurašytą turtą (${writtenOffItems.length})`
+                  : `Archyvuotas / nurašytas turtas (${writtenOffItems.length})`}
+              </button>
             )}
 
             {(searchQuery || selectedRoomFilter !== 'all' || selectedCategoryFilter !== 'all') && (
@@ -310,8 +315,8 @@ export const MyInventoryView: React.FC<MyInventoryViewProps> = ({
             <Boxes className="w-12 h-12 text-slate-300 mx-auto" />
             <h3 className="text-sm font-bold text-slate-800">Turto įrašų nerasta</h3>
             <p className="text-xs text-slate-500 max-w-sm mx-auto">
-              {myAllItems.length === 0 
-                ? 'Jums šiuo metu nėra priskirto materialiojo turto arba nesate priskirtas prie konkrečių kabinetų.' 
+              {baseDisplayItems.length === 0 
+                ? 'Jums šiuo metu nėra priskirto aktyvaus materialiojo turto arba nesate priskirtas prie konkrečių kabinetų.' 
                 : 'Pagal nurodytus paieškos ar filtrų kriterijus daiktų nerasta.'}
             </p>
           </div>
@@ -320,15 +325,24 @@ export const MyInventoryView: React.FC<MyInventoryViewProps> = ({
             {filteredItems.map(item => {
               const room = rooms.find(r => r.id === item.roomId);
               const dept = departments.find(d => d.id === item.departmentId);
-              const hasDefect = item.status === 'in_repair' || (item.defectReports && item.defectReports.length > 0);
-              const latestDefect = item.defectReports?.[item.defectReports.length - 1];
+              const activeDefects = getActiveDefects(item);
+              const resolvedDefects = getResolvedDefects(item);
+              const latestActiveDefect = activeDefects[activeDefects.length - 1];
+              const isWrittenOff = item.status === 'written_off';
+              const isToWriteOff = item.status === 'to_writeoff';
+              const isInRepair = item.status === 'in_repair';
+              const hasReportedOnly = !isWrittenOff && !isToWriteOff && !isInRepair && activeDefects.length > 0;
 
               return (
                 <div 
                   key={item.id}
                   className={`bg-white border rounded-xl overflow-hidden shadow-xs hover:shadow-md transition-all flex flex-col justify-between ${
-                    hasDefect 
-                      ? 'border-amber-300 ring-1 ring-amber-400/40 bg-amber-50/20' 
+                    isWrittenOff
+                      ? 'border-purple-200 bg-purple-50/20 opacity-85'
+                      : isToWriteOff
+                      ? 'border-rose-300 bg-rose-50/20'
+                      : isInRepair || activeDefects.length > 0
+                      ? 'border-amber-300 ring-1 ring-amber-400/40 bg-amber-50/20'
                       : 'border-slate-300 hover:border-slate-400'
                   }`}
                 >
@@ -338,18 +352,27 @@ export const MyInventoryView: React.FC<MyInventoryViewProps> = ({
                       <span className="font-mono text-xs font-bold text-blue-800 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
                         {item.inventoryNumber}
                       </span>
-                      <div className="flex items-center gap-1">
-                        {hasDefect ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
-                            <AlertTriangle className="w-3 h-3 text-amber-700" />
+                      <div className="flex items-center gap-1 flex-wrap justify-end">
+                        {isWrittenOff ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-900 border border-purple-200">
+                            <span>Nurašytas (archyve)</span>
+                          </span>
+                        ) : isToWriteOff ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200">
+                            <span>Teikiamas nurašyti</span>
+                          </span>
+                        ) : isInRepair ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                            <Wrench className="w-3 h-3 text-amber-700" />
                             <span>Remontuojamas</span>
                           </span>
-                        ) : item.status === 'to_writeoff' ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200">
-                            <span>Nurašomas</span>
+                        ) : hasReportedOnly ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-sky-100 text-sky-900 border border-sky-300">
+                            <Clock className="w-3 h-3 text-sky-700" />
+                            <span>Praneštas gedimas ({activeDefects.length})</span>
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
                             <CheckCircle2 className="w-3 h-3 text-emerald-600" />
                             <span>Veikiantis</span>
                           </span>
@@ -407,20 +430,35 @@ export const MyInventoryView: React.FC<MyInventoryViewProps> = ({
                       </div>
                     )}
 
-                    {/* Defect Alert Notice if reported */}
-                    {hasDefect && latestDefect && (
+                    {/* Active Defect Alert Notice (never show resolved defects as active) */}
+                    {activeDefects.length > 0 && latestActiveDefect && (
                       <div className="p-2 bg-amber-100/70 border border-amber-300 rounded-lg text-[11px] text-amber-900 space-y-1">
-                        <div className="font-bold flex items-center gap-1">
-                          <AlertTriangle className="w-3.5 h-3.5 text-amber-700" />
-                          <span>Užregistruotas gedimas</span>
+                        <div className="font-bold flex items-center justify-between gap-1">
+                          <span className="inline-flex items-center gap-1">
+                            <AlertTriangle className="w-3.5 h-3.5 text-amber-700" />
+                            <span>
+                              {latestActiveDefect.status === 'in_repair'
+                                ? 'Vyksta remontas'
+                                : 'Praneštas gedimas (laukia įvertinimo)'}
+                            </span>
+                          </span>
+                          {activeDefects.length > 1 && (
+                            <span className="text-[10px] font-mono">+{activeDefects.length - 1} kt.</span>
+                          )}
                         </div>
                         <p className="line-clamp-2 italic text-amber-950">
-                          {latestDefect.description}
+                          {latestActiveDefect.description}
                         </p>
                         <div className="text-[10px] text-amber-800 flex items-center justify-between pt-0.5">
-                          <span>Pranešė: {latestDefect.reportedByUserName}</span>
-                          <span>{new Date(latestDefect.reportedAt).toLocaleDateString('lt-LT')}</span>
+                          <span>Pranešė: {latestActiveDefect.reportedByUserName}</span>
+                          <span>{new Date(latestActiveDefect.reportedAt).toLocaleDateString('lt-LT')}</span>
                         </div>
+                      </div>
+                    )}
+
+                    {activeDefects.length === 0 && resolvedDefects.length > 0 && !isWrittenOff && (
+                      <div className="text-[11px] text-emerald-800 bg-emerald-50/80 border border-emerald-200 rounded px-2 py-1">
+                        Istorija: išspręstų gedimų – {resolvedDefects.length} (visi sutvarkyti).
                       </div>
                     )}
                   </div>
@@ -436,14 +474,20 @@ export const MyInventoryView: React.FC<MyInventoryViewProps> = ({
                       <span>Kortelė</span>
                     </button>
 
-                    <button
-                      type="button"
-                      onClick={() => setFaultItem(item)}
-                      className="inline-flex items-center gap-1.5 text-xs font-bold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 py-1.5 px-3 rounded-md transition-colors cursor-pointer shadow-2xs"
-                    >
-                      <Wrench className="w-3.5 h-3.5 text-amber-700" />
-                      <span>Pranešti apie gedimą</span>
-                    </button>
+                    {!isWrittenOff ? (
+                      <button
+                        type="button"
+                        onClick={() => setFaultItem(item)}
+                        className="inline-flex items-center gap-1.5 text-xs font-bold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 py-1.5 px-3 rounded-md transition-colors cursor-pointer shadow-2xs"
+                      >
+                        <Wrench className="w-3.5 h-3.5 text-amber-700" />
+                        <span>Pranešti apie gedimą</span>
+                      </button>
+                    ) : (
+                      <span className="text-[11px] text-purple-700 font-medium">
+                        Nurašyta į archyvą
+                      </span>
+                    )}
                   </div>
                 </div>
               );

@@ -43,6 +43,7 @@ import {
   ComputerType,
   ComputerSpecs,
   WriteOffAct,
+  OrganizationSettings,
   COMPUTER_TYPE_LABELS,
   COMPUTER_TYPE_SHORT_LABELS,
   ASSET_CLASS_SHORT_LABELS,
@@ -58,6 +59,8 @@ import {
 } from '../utils/writeOffUtils';
 import { resolveAssetClass, resolveFundingSource } from '../utils/accountingUtils';
 import { calculateCalendarAgeYears, getCurrentYearVilnius } from '../utils/dateUtils';
+import { DEFAULT_ORGANIZATION_SETTINGS } from '../utils/organization';
+import { getReportedDefects } from '../utils/defectUtils';
 
 export function calculateAgeInYears(acquisitionDate: string): number {
   return calculateCalendarAgeYears(acquisitionDate);
@@ -89,6 +92,7 @@ interface InventoryListViewProps {
   rooms: Room[];
   users: User[];
   writeOffActs?: WriteOffAct[];
+  organizationSettings?: OrganizationSettings;
   currentUser: User;
   onEditItem: (item: InventoryItem) => void;
   onDeleteItem: (itemId: string) => void;
@@ -114,6 +118,7 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
   rooms,
   users,
   writeOffActs = [],
+  organizationSettings,
   currentUser,
   onEditItem,
   onDeleteItem,
@@ -206,37 +211,41 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
 
   // Brother PT-E920BT 1-by-1 printing state
   const [lastPrintedId, setLastPrintedId] = useState<string | null>(null);
-  const [printToast, setPrintToast] = useState<{ id: string; message: string } | null>(null);
+  const [printToast, setPrintToast] = useState<{ id: string; isError?: boolean; message: string } | null>(null);
 
   const handlePrintSingleItem = async (item: InventoryItem, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
+    setPrintToast({
+      id: item.id,
+      message: `Ruošiama etiketė: ${item.inventoryNumber} (${item.name})...`
+    });
+
+    const result = await directPrintBrotherLabels({
+      items: [item],
+      rooms,
+      departments,
+      tapeWidthMm: 36,
+      labelLengthMm: 68,
+      codeType: 'qr_code',
+      organization: organizationSettings,
+      schoolName: organizationSettings?.name || DEFAULT_ORGANIZATION_SETTINGS.name,
+    });
+
+    if (result.status === 'error') {
+      setPrintToast({
+        id: item.id,
+        isError: true,
+        message: result.error || 'Nepavyko atidaryti spausdinimo lango.'
+      });
+      return;
+    }
+
     setLastPrintedId(item.id);
     setPrintToast({
       id: item.id,
-      message: `Spausdinama: ${item.inventoryNumber} (${item.name}). Užklijuokite ant daikto!`
+      message: `Atidarytas spausdinimo langas: ${item.inventoryNumber}. Patvirtinus spausdintuve, užklijuokite ant daikto.`
     });
-
-    try {
-      await directPrintBrotherLabels({
-        items: [item],
-        rooms,
-        departments,
-        tapeWidthMm: 36,
-        labelLengthMm: 68,
-        codeType: 'qr_code',
-        schoolName: 'TRYŠKIŲ LAZDYNYŲ PELĖDOS GIMN.'
-      });
-      setTimeout(() => {
-        setPrintToast({
-          id: item.id,
-          message: `Atspausdinta: ${item.inventoryNumber}! Užklijuota? Galite pasirinkti kitą.`
-        });
-        setTimeout(() => setPrintToast(null), 4500);
-      }, 1000);
-    } catch (err) {
-      console.error('Single print failed', err);
-      setPrintToast(null);
-    }
+    setTimeout(() => setPrintToast(null), 4500);
   };
 
   // Filtered items list
@@ -457,16 +466,22 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
     <div className="space-y-4">
       {/* Toast Notification for Brother 1-by-1 Printing */}
       {printToast && (
-        <div className="fixed top-4 right-4 z-50 bg-slate-900 text-white px-4 py-3 rounded-xl shadow-2xl text-xs flex items-center gap-3 border border-slate-700 animate-in fade-in slide-in-from-top-2">
+        <div
+          className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl shadow-2xl text-xs flex items-center gap-3 border animate-in fade-in slide-in-from-top-2 ${
+            printToast.isError
+              ? 'bg-rose-950 text-white border-rose-700'
+              : 'bg-slate-900 text-white border-slate-700'
+          }`}
+        >
           <div className="w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center text-blue-400 shrink-0">
-            <Printer className="w-4 h-4 animate-pulse" />
+            <Printer className="w-4 h-4" />
           </div>
           <div>
             <div className="font-semibold text-white flex items-center gap-1.5">
               <span>Brother PT-E920BT (36 mm)</span>
               <span className="text-[10px] px-1.5 py-0.2 bg-blue-500/30 text-blue-300 rounded font-mono">1 vnt.</span>
             </div>
-            <div className="text-slate-300 text-[11px] mt-0.5">{printToast.message}</div>
+            <div className="text-slate-200 text-[11px] mt-0.5">{printToast.message}</div>
           </div>
         </div>
       )}
@@ -1296,6 +1311,11 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
                             <div className={`font-medium ${statusColor}`}>
                               {statusLabel}
                             </div>
+                            {item.status === 'active' && getReportedDefects(item).length > 0 && (
+                              <div className="text-[10px] font-semibold text-sky-800">
+                                Praneštas gedimas ({getReportedDefects(item).length})
+                              </div>
+                            )}
                             <div className="text-[11px] text-slate-500">
                               Būklė: {item.condition === 'new' ? 'Nauja' : item.condition === 'good' ? 'Gera' : item.condition === 'fair' ? 'Patenkinama' : 'Prasta'}
                             </div>
@@ -1313,14 +1333,14 @@ export const InventoryListView: React.FC<InventoryListViewProps> = ({
                               title={`Spausdinti 36 mm etiketę į Brother PT-E920BT (${item.inventoryNumber})`}
                               className={`p-1 rounded cursor-pointer transition-all flex items-center gap-1 ${
                                 lastPrintedId === item.id
-                                  ? 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-500 font-semibold px-1.5'
+                                  ? 'bg-blue-100 text-blue-800 ring-1 ring-blue-400 font-semibold px-1.5'
                                   : 'text-slate-400 hover:text-blue-600 hover:bg-blue-50'
                               }`}
                             >
                               {lastPrintedId === item.id ? (
                                 <>
-                                  <Check className="w-3.5 h-3.5 text-emerald-700" />
-                                  <span className="text-[10px] text-emerald-800">Atspausdinta</span>
+                                  <Printer className="w-3.5 h-3.5 text-blue-700" />
+                                  <span className="text-[10px] text-blue-800">Iškviestas</span>
                                 </>
                               ) : (
                                 <Printer className="w-4 h-4 text-blue-600" />

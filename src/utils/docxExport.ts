@@ -2,6 +2,7 @@ import {
   AlignmentType,
   BorderStyle,
   Document,
+  ImageRun,
   Packer,
   Paragraph,
   ShadingType,
@@ -11,8 +12,26 @@ import {
   TextRun,
   WidthType,
 } from 'docx';
+import QRCode from 'qrcode';
+import {
+  Department,
+  InventoryItem,
+  OrganizationSettings,
+  Room,
+  formatRoomName,
+} from '../types/inventory';
 import { formatMoneyFixed } from './accountingUtils';
 import { getCalendarDatePart } from './dateUtils';
+import {
+  CODE_TYPE_LABELS,
+  CodeType,
+  LabelLength,
+  TapeWidth,
+  getBarcodeValue,
+  renderCode128PngBytes,
+} from './labelUtils';
+import { cloneOrganizationSettings } from './organization';
+import { buildItemQrPayload } from './qrUtils';
 import {
   AuditSessionReportData,
   RegistrySheetReportData,
@@ -1088,5 +1107,310 @@ export async function generateReportDocxBuffer(report: ResolvedReportData): Prom
     throw new Error(report.emptyReason || 'Negalima sugeneruoti tuščios ataskaitos.');
   }
   const doc = buildReportDocxDocument(report);
+  return Packer.toBuffer(doc);
+}
+
+function dataUrlToUint8Array(dataUrl: string): Uint8Array {
+  const base64Part = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+  if (typeof atob === 'function') {
+    const binary = atob(base64Part);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  }
+  if (typeof Buffer !== 'undefined') {
+    return new Uint8Array(Buffer.from(base64Part, 'base64'));
+  }
+  throw new Error('Nepavyko dekoduoti PNG duomenų srauto.');
+}
+
+export interface LabelsDocxOptions {
+  items: InventoryItem[];
+  rooms: Room[];
+  departments: Department[];
+  tapeWidthMm: TapeWidth;
+  labelLengthMm: LabelLength;
+  codeType: CodeType;
+  organization?: OrganizationSettings;
+}
+
+export function getLabelsDocxFilename(
+  tapeWidthMm: TapeWidth,
+  codeType: CodeType,
+  dateStr: string = new Date().toISOString().slice(0, 10)
+): string {
+  const codeSlug =
+    codeType === 'qr_code' ? 'qr' : codeType === 'barcode_1d' ? '1d' : 'qr-1d';
+  return `tryskiai-etiketes-brother-${tapeWidthMm}mm-${codeSlug}-${dateStr}.docx`;
+}
+
+export async function buildLabelsDocxDocument(
+  options: LabelsDocxOptions
+): Promise<Document> {
+  const {
+    items,
+    rooms,
+    departments,
+    tapeWidthMm,
+    labelLengthMm,
+    codeType,
+    organization,
+  } = options;
+
+  if (!items || items.length === 0) {
+    throw new Error('Nepasirinkta nė vieno daikto etikečių eksportui.');
+  }
+
+  const org = cloneOrganizationSettings(organization);
+  const qrSizePx =
+    codeType === 'both'
+      ? tapeWidthMm === 36
+        ? 78
+        : tapeWidthMm === 24
+        ? 60
+        : 48
+      : tapeWidthMm === 36
+      ? 92
+      : tapeWidthMm === 24
+      ? 72
+      : 54;
+
+  const barcodeTargetW = codeType === 'barcode_1d' ? 210 : 155;
+  const barcodeTargetH = codeType === 'barcode_1d' ? 38 : 24;
+
+  const labelTables: Array<Paragraph | Table> = [
+    new Paragraph({
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 60 },
+      children: [
+        new TextRun({
+          text: sanitizeDocxText(org.name),
+          bold: true,
+          font: FONT_FAMILY,
+          size: 22,
+          color: '0F172A',
+        }),
+      ],
+    }),
+    new Paragraph({
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 180 },
+      children: [
+        new TextRun({
+          text: sanitizeDocxText(
+            `Brother PT-E920BT etiketės (${tapeWidthMm} × ${labelLengthMm} mm) · ${CODE_TYPE_LABELS[codeType]} · Kiekis: ${items.length} vnt.`
+          ),
+          font: FONT_FAMILY,
+          size: 18,
+          color: '475569',
+        }),
+      ],
+    }),
+  ];
+
+  for (const item of items) {
+    const room = rooms.find((r) => r.id === item.roomId);
+    const dept = departments.find((d) => d.id === item.departmentId);
+    const roomText = formatRoomName(room, true);
+    const deptText = dept?.code || dept?.name || '';
+    const barcodeVal = getBarcodeValue(item);
+
+    let qrBytes: Uint8Array | null = null;
+    if (codeType === 'qr_code' || codeType === 'both') {
+      const payload = buildItemQrPayload(item);
+      const dataUrl = await QRCode.toDataURL(payload, {
+        margin: 1,
+        width: 220,
+        errorCorrectionLevel: 'M',
+        color: { dark: '#000000', light: '#ffffff' },
+      });
+      qrBytes = dataUrlToUint8Array(dataUrl);
+    }
+
+    let barcodeBytes: Uint8Array | null = null;
+    if (codeType === 'barcode_1d' || codeType === 'both') {
+      barcodeBytes = renderCode128PngBytes(barcodeVal, 2, 46);
+    }
+
+    const metaLine = [
+      roomText,
+      deptText ? `(${deptText})` : '',
+      item.serialNumber ? `SN: ${item.serialNumber}` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+
+    const textParagraphs: Paragraph[] = [
+      new Paragraph({
+        spacing: { after: 20 },
+        children: [
+          new TextRun({
+            text: sanitizeDocxText(org.name.toUpperCase()),
+            bold: true,
+            font: FONT_FAMILY,
+            size: 14,
+            color: '475569',
+          }),
+        ],
+      }),
+      new Paragraph({
+        spacing: { after: 25 },
+        children: [
+          new TextRun({
+            text: sanitizeDocxText(item.inventoryNumber),
+            bold: true,
+            font: 'Courier New',
+            size: 24,
+            color: '000000',
+          }),
+        ],
+      }),
+      new Paragraph({
+        spacing: { after: 35 },
+        children: [
+          new TextRun({
+            text: sanitizeDocxText(item.name),
+            bold: true,
+            font: FONT_FAMILY,
+            size: 18,
+            color: '0F172A',
+          }),
+        ],
+      }),
+    ];
+
+    if (barcodeBytes) {
+      textParagraphs.push(
+        new Paragraph({
+          spacing: { before: 20, after: 25 },
+          children: [
+            new ImageRun({
+              type: 'png',
+              data: barcodeBytes,
+              transformation: {
+                width: barcodeTargetW,
+                height: barcodeTargetH,
+              },
+            }),
+          ],
+        })
+      );
+      if (barcodeVal !== item.inventoryNumber) {
+        textParagraphs.push(
+          new Paragraph({
+            spacing: { after: 20 },
+            children: [
+              new TextRun({
+                text: sanitizeDocxText(`Brūkšninis kodas: ${barcodeVal}`),
+                font: 'Courier New',
+                size: 14,
+                color: '334155',
+              }),
+            ],
+          })
+        );
+      }
+    }
+
+    textParagraphs.push(
+      new Paragraph({
+        spacing: { before: 20 },
+        children: [
+          new TextRun({
+            text: sanitizeDocxText(metaLine),
+            font: FONT_FAMILY,
+            size: 15,
+            color: '475569',
+          }),
+        ],
+      })
+    );
+
+    const rowCells: TableCell[] = [];
+    if (qrBytes) {
+      rowCells.push(
+        new TableCell({
+          borders: CELL_BORDER,
+          width: { size: 22, type: WidthType.PERCENTAGE },
+          margins: { top: 80, bottom: 80, left: 80, right: 80 },
+          children: [
+            new Paragraph({
+              alignment: AlignmentType.CENTER,
+              children: [
+                new ImageRun({
+                  type: 'png',
+                  data: qrBytes,
+                  transformation: {
+                    width: qrSizePx,
+                    height: qrSizePx,
+                  },
+                }),
+              ],
+            }),
+          ],
+        })
+      );
+    }
+
+    rowCells.push(
+      new TableCell({
+        borders: CELL_BORDER,
+        width: { size: qrBytes ? 78 : 100, type: WidthType.PERCENTAGE },
+        margins: { top: 80, bottom: 80, left: 110, right: 110 },
+        children: textParagraphs,
+      })
+    );
+
+    labelTables.push(
+      new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        rows: [
+          new TableRow({
+            cantSplit: true,
+            children: rowCells,
+          }),
+        ],
+      }),
+      new Paragraph({
+        spacing: { after: 120 },
+        children: [],
+      })
+    );
+  }
+
+  return new Document({
+    creator: sanitizeDocxText(org.name),
+    title: sanitizeDocxText(`Inventoriaus etiketės (${tapeWidthMm}x${labelLengthMm} mm)`),
+    sections: [
+      {
+        properties: {
+          page: {
+            size: {
+              width: 11906,
+              height: 16838,
+            },
+            margin: {
+              top: 720,
+              right: 720,
+              bottom: 720,
+              left: 720,
+            },
+          },
+        },
+        children: labelTables,
+      },
+    ],
+  });
+}
+
+export async function generateLabelsDocxBlob(options: LabelsDocxOptions): Promise<Blob> {
+  const doc = await buildLabelsDocxDocument(options);
+  return Packer.toBlob(doc);
+}
+
+export async function generateLabelsDocxBuffer(options: LabelsDocxOptions): Promise<Buffer> {
+  const doc = await buildLabelsDocxDocument(options);
   return Packer.toBuffer(doc);
 }

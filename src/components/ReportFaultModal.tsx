@@ -138,7 +138,7 @@ export const ReportFaultModal: React.FC<ReportFaultModalProps> = ({
             </div>
             <h4 className="text-sm font-bold text-slate-900">Gedimas sėkmingai užregistruotas!</h4>
             <p className="text-xs text-slate-600 max-w-xs mx-auto">
-              Ačiū, informacija perduota administratoriui. Daikto būsena pakeista į „Remontuojamas“.
+              Pranešimas išsaugotas būsena „Pranešta“. Turto būsena automatiškai nepakeista – IT arba ūkio vedėjas pradės remontą įvertinęs gedimą.
             </p>
           </div>
         ) : (
@@ -163,6 +163,12 @@ export const ReportFaultModal: React.FC<ReportFaultModalProps> = ({
                   </div>
                 )}
               </div>
+
+              {item.status === 'to_writeoff' && (
+                <div className="p-2.5 bg-rose-50 border border-rose-200 text-rose-900 rounded-md text-[11px] leading-relaxed">
+                  <strong>Pastaba:</strong> Šis turtas šiuo metu yra teikiamas nurašyti. Pranešimas bus išsaugotas gedimų istorijoje, tačiau nurašymo procedūra išlaiko pirmenybę ir daiktas nebus automatiškai grąžintas į remontą.
+                </div>
+              )}
 
               {error && (
                 <div className="p-2.5 bg-rose-50 border border-rose-200 text-rose-700 rounded-md font-medium text-xs">

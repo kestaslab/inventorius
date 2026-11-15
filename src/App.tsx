@@ -34,11 +34,11 @@ import {
   AuthSettings,
   DefectReport,
   ItemCondition,
-  OrganizationSettings,
-  getUserAssignedRoomIds
+  OrganizationSettings
 } from './types/inventory';
 import { StorageService, SyncState, DbMutation } from './utils/storage';
 import { getCurrentYearVilnius, getTodayVilniusDate } from './utils/dateUtils';
+import { getMyInventorySummary } from './utils/defectUtils';
 
 function describePendingMutation(op: DbMutation): string {
   switch (op.type) {
@@ -58,12 +58,18 @@ function describePendingMutation(op: DbMutation): string {
       return `Turto atkūrimas iš archyvo (${op.itemId})`;
     case 'SAVE_FAULT_REPORT':
       return `Gedimo pranešimas (${op.itemId})`;
+    case 'START_DEFECT_REPAIR':
+      return `Remonto pradžia (${op.itemId})`;
+    case 'RESOLVE_DEFECT':
+      return `Gedimo užbaigimas (${op.itemId})`;
     case 'SAVE_DEPARTMENT':
       return `Skyrius „${op.department.name}“`;
     case 'SAVE_ROOM':
       return `Kabinetas „${op.room.name}“`;
     case 'SAVE_USER':
       return `Naudotojas „${op.user.fullName}“`;
+    case 'BATCH_IMPORT_USERS':
+      return `Darbuotojų masinis importas (${op.users.length} įr.)`;
     case 'CREATE_AUDIT_SESSION':
       return `Nauja inventorizacija „${op.session.title}“`;
     case 'UPDATE_AUDIT_SESSION_SETTINGS':
@@ -205,15 +211,10 @@ export default function App() {
   const currentUser = users.find(u => u.id === activeUserId) || null;
   const activeAuditSession = auditSessions.find(s => s.status === 'in_progress') || auditSessions[0];
 
-  // Number of items assigned to the current user directly or located in their rooms
+  // Number of active (non-written-off) items assigned to current user (matches MyInventoryView)
   const myItemsCount = useMemo(() => {
-    if (!currentUser) return 0;
-    const userRoomIds = getUserAssignedRoomIds(currentUser);
-    return items.filter(i => 
-      i.responsibleUserId === currentUser.id ||
-      (i.roomId && userRoomIds.includes(i.roomId))
-    ).length;
-  }, [items, currentUser]);
+    return getMyInventorySummary(items, currentUser, rooms).assignedItems.length;
+  }, [items, currentUser, rooms]);
 
   // Teachers are strictly focused on "Mano inventorius" tab
   useEffect(() => {
@@ -304,9 +305,10 @@ export default function App() {
     }
   }, [users]);
 
-  // Batch Import Users (CSV)
-  const handleBatchImportUsers = (newUsersList: User[]) => {
-    void runMutation({ type: 'BATCH_IMPORT_USERS', users: newUsersList });
+  // Batch Import Users (CSV) - atomic server confirmation
+  const handleBatchImportUsers = async (newUsersList: User[]) => {
+    const res = await runMutation({ type: 'BATCH_IMPORT_USERS', users: newUsersList });
+    return { ok: res.ok, error: res.error };
   };
 
   // Simulate Cloudflare Access Login / Test Screen
@@ -512,18 +514,51 @@ export default function App() {
     return { ok: res.ok, error: res.error };
   };
 
-  // Defect / Fault Report Handler from teachers or staff
+  // Defect / Fault Report Handler (registers 'reported' without starting repair or degrading condition)
   const handleSaveFaultReport = (itemToSave: InventoryItem, defectReport: DefectReport) => {
-    const defectNote = `[Gedimas ${getTodayVilniusDate()}]: ${defectReport.description}`;
-    const newCondition: ItemCondition =
-      itemToSave.condition === 'new' ? 'fair' : itemToSave.condition === 'good' ? 'fair' : 'poor';
     void runMutation({
       type: 'SAVE_FAULT_REPORT',
       itemId: itemToSave.id,
       defectReport,
-      defectNote,
-      newCondition,
     });
+  };
+
+  const handleStartDefectRepair = async (
+    itemId: string,
+    defectId: string,
+    repairNotes?: string
+  ) => {
+    const res = await runMutation({
+      type: 'START_DEFECT_REPAIR',
+      itemId,
+      defectId,
+      startedByUserId: currentUser?.id,
+      startedByUserName: currentUser?.fullName || 'Administratorius',
+      startedAt: new Date().toISOString(),
+      ...(repairNotes ? { repairNotes } : {}),
+    });
+    return { ok: res.ok, error: res.error };
+  };
+
+  const handleResolveDefect = async (payload: {
+    itemId: string;
+    defectId: string;
+    resolutionNotes: string;
+    returnToActive?: boolean;
+    newCondition?: ItemCondition;
+  }) => {
+    const res = await runMutation({
+      type: 'RESOLVE_DEFECT',
+      itemId: payload.itemId,
+      defectId: payload.defectId,
+      resolvedByUserId: currentUser?.id,
+      resolvedByUserName: currentUser?.fullName || 'Administratorius',
+      resolvedAt: new Date().toISOString(),
+      resolutionNotes: payload.resolutionNotes,
+      returnToActive: payload.returnToActive,
+      ...(payload.newCondition ? { newCondition: payload.newCondition } : {}),
+    });
+    return { ok: res.ok, error: res.error };
   };
 
   // Save / Delete Department
@@ -979,6 +1014,7 @@ export default function App() {
                 rooms={rooms}
                 users={users}
                 writeOffActs={writeOffActs}
+                organizationSettings={organizationSettings}
                 currentUser={currentUser}
                 onEditItem={(item) => {
                   setEditingItem(item);
@@ -1068,6 +1104,8 @@ export default function App() {
                 departments={departments}
                 rooms={rooms}
                 preSelectedIds={labelsPreselectedIds}
+                organizationSettings={organizationSettings}
+                onClearPreselection={() => setLabelsPreselectedIds([])}
               />
             )}
 
@@ -1154,6 +1192,7 @@ export default function App() {
           users={users}
           movements={movements}
           currentUser={currentUser}
+          organizationSettings={organizationSettings}
           onEdit={(item) => {
             setEditingItem(item);
             setIsItemModalOpen(true);
@@ -1170,6 +1209,8 @@ export default function App() {
             setFaultTargetItem(item);
             setIsFaultModalOpen(true);
           }}
+          onStartDefectRepair={handleStartDefectRepair}
+          onResolveDefect={handleResolveDefect}
         />
       )}
 

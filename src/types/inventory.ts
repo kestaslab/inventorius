@@ -151,6 +151,13 @@ export interface DefectReport {
   severity: 'low' | 'medium' | 'high';
   status: 'reported' | 'in_repair' | 'resolved';
   photoUrl?: string;
+  repairStartedAt?: string;
+  repairStartedByUserId?: string;
+  repairStartedByUserName?: string;
+  repairNotes?: string;
+  resolvedAt?: string;
+  resolvedByUserId?: string;
+  resolvedByUserName?: string;
   resolutionNotes?: string;
 }
 

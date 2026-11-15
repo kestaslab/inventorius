@@ -38,6 +38,11 @@ import {
   evaluateItemAuditScope,
   isItemInAuditScope,
 } from './auditUtils';
+import {
+  canStartDefectRepair,
+  computeActiveDefectNote,
+  getActiveDefects,
+} from './defectUtils';
 
 export type DbMutation =
   | { type: 'SAVE_ITEM'; item: InventoryItem }
@@ -96,8 +101,28 @@ export type DbMutation =
       type: 'SAVE_FAULT_REPORT';
       itemId: string;
       defectReport: DefectReport;
-      defectNote: string;
-      newCondition: ItemCondition;
+      defectNote?: string;
+      newCondition?: ItemCondition;
+    }
+  | {
+      type: 'START_DEFECT_REPAIR';
+      itemId: string;
+      defectId: string;
+      startedByUserId?: string;
+      startedByUserName: string;
+      startedAt?: string;
+      repairNotes?: string;
+    }
+  | {
+      type: 'RESOLVE_DEFECT';
+      itemId: string;
+      defectId: string;
+      resolvedByUserId?: string;
+      resolvedByUserName: string;
+      resolvedAt?: string;
+      resolutionNotes: string;
+      returnToActive?: boolean;
+      newCondition?: ItemCondition;
     }
   | { type: 'SAVE_DEPARTMENT'; department: Department }
   | { type: 'DELETE_DEPARTMENT'; departmentId: string }
@@ -245,6 +270,8 @@ export function getTouchedEntityKeys(db: AppDatabase, op: DbMutation): string[] 
       return keys;
     }
     case 'SAVE_FAULT_REPORT':
+    case 'START_DEFECT_REPAIR':
+    case 'RESOLVE_DEFECT':
       return [`item:${op.itemId}`];
     case 'SAVE_DEPARTMENT':
       return [`department:${op.department.id}`];
@@ -352,6 +379,8 @@ export function getOperationReferencedKeys(db: AppDatabase, op: DbMutation): str
     case 'REJECT_WRITEOFF':
     case 'RESTORE_FROM_ARCHIVE':
     case 'SAVE_FAULT_REPORT':
+    case 'START_DEFECT_REPAIR':
+    case 'RESOLVE_DEFECT':
     case 'DELETE_ITEM':
       keys.add(`item:${op.itemId}`);
       break;
@@ -409,6 +438,18 @@ export function getOperationReferencedKeys(db: AppDatabase, op: DbMutation): str
       break;
     case 'CREATE_AUDIT_SESSION':
       if (op.session.departmentId) keys.add(`department:${op.session.departmentId}`);
+      break;
+    case 'BATCH_IMPORT_USERS':
+      for (const u of op.users || []) {
+        if (u.departmentId) keys.add(`department:${u.departmentId}`);
+        for (const rId of getUserAssignedRoomIds(u)) {
+          keys.add(`room:${rId}`);
+        }
+        const matched = db.users.find(
+          (ex) => ex.email.toLowerCase() === (u.email || '').trim().toLowerCase()
+        );
+        if (matched) keys.add(`user:${matched.id}`);
+      }
       break;
   }
 
@@ -1390,18 +1431,157 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
     }
 
     case 'SAVE_FAULT_REPORT': {
+      const targetItem = db.items.find((i) => i.id === op.itemId);
+      if (!targetItem) {
+        return { ok: false, statusCode: 404, error: 'Turtas nerastas.' };
+      }
+      const desc = op.defectReport?.description?.trim();
+      if (!desc) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'Gedimo aprašymas yra privalomas.',
+        };
+      }
+
+      const normalizedReport: DefectReport = {
+        ...op.defectReport,
+        description: desc,
+        status: 'reported',
+      };
+
       const items = db.items.map((i) => {
         if (i.id !== op.itemId) return i;
-        const existingReports = i.defectReports || [];
+        const nextReports = [...(i.defectReports || []), normalizedReport];
+        // Svarbu: naujas gedimo pranešimas NEKEIČIA item.status (nepradeda remonto,
+        // neperrašo to_writeoff / written_off) ir NEBLOGINA item.condition!
+        return {
+          ...i,
+          activeDefectNote: computeActiveDefectNote(nextReports),
+          defectReports: nextReports,
+        };
+      });
+      return {
+        ok: true,
+        database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, items },
+      };
+    }
+
+    case 'START_DEFECT_REPAIR': {
+      const targetItem = db.items.find((i) => i.id === op.itemId);
+      if (!targetItem) {
+        return { ok: false, statusCode: 404, error: 'Turtas nerastas.' };
+      }
+      const targetDefect = (targetItem.defectReports || []).find((d) => d.id === op.defectId);
+      if (!targetDefect) {
+        return { ok: false, statusCode: 404, error: 'Gedimo įrašas nerastas.' };
+      }
+
+      const permission = canStartDefectRepair(targetItem, targetDefect);
+      if (!permission.allowed) {
+        return {
+          ok: false,
+          statusCode: 409,
+          error: permission.reason || 'Negalima pradėti remonto šiam daiktui.',
+        };
+      }
+
+      const startedAt = op.startedAt || nowIso;
+      const startedByName = op.startedByUserName?.trim() || 'Darbuotojas';
+      const repairNotes = op.repairNotes?.trim();
+
+      const items = db.items.map((i) => {
+        if (i.id !== op.itemId) return i;
+        const nextReports: DefectReport[] = (i.defectReports || []).map((d) =>
+          d.id === op.defectId
+            ? {
+                ...d,
+                status: 'in_repair',
+                repairStartedAt: startedAt,
+                ...(op.startedByUserId ? { repairStartedByUserId: op.startedByUserId } : {}),
+                repairStartedByUserName: startedByName,
+                ...(repairNotes ? { repairNotes } : {}),
+              }
+            : d
+        );
         return {
           ...i,
           status: 'in_repair' as const,
-          condition: op.newCondition,
-          notes: i.notes ? `${i.notes} | ${op.defectNote}` : op.defectNote,
-          activeDefectNote: op.defectReport.description,
-          defectReports: [...existingReports, op.defectReport],
+          defectReports: nextReports,
+          activeDefectNote: computeActiveDefectNote(nextReports),
         };
       });
+
+      return {
+        ok: true,
+        database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, items },
+      };
+    }
+
+    case 'RESOLVE_DEFECT': {
+      const targetItem = db.items.find((i) => i.id === op.itemId);
+      if (!targetItem) {
+        return { ok: false, statusCode: 404, error: 'Turtas nerastas.' };
+      }
+      const resolutionNotes = op.resolutionNotes?.trim();
+      if (!resolutionNotes) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'Užbaigiant gedimą privaloma įrašyti sprendimo pastabą (kas buvo atlikta).',
+        };
+      }
+      const targetDefect = (targetItem.defectReports || []).find((d) => d.id === op.defectId);
+      if (!targetDefect) {
+        return { ok: false, statusCode: 404, error: 'Gedimo įrašas nerastas.' };
+      }
+      if (targetDefect.status === 'resolved') {
+        return {
+          ok: false,
+          statusCode: 409,
+          error: 'Šis gedimas jau yra pažymėtas kaip išspręstas.',
+        };
+      }
+
+      const resolvedAt = op.resolvedAt || nowIso;
+      const resolvedByName = op.resolvedByUserName?.trim() || 'Darbuotojas';
+
+      const items = db.items.map((i) => {
+        if (i.id !== op.itemId) return i;
+        const nextReports: DefectReport[] = (i.defectReports || []).map((d) =>
+          d.id === op.defectId
+            ? {
+                ...d,
+                status: 'resolved',
+                resolvedAt,
+                ...(op.resolvedByUserId ? { resolvedByUserId: op.resolvedByUserId } : {}),
+                resolvedByUserName: resolvedByName,
+                resolutionNotes,
+              }
+            : d
+        );
+        const remainingActive = getActiveDefects({ defectReports: nextReports });
+        const hasWriteOffPriority = i.status === 'written_off' || i.status === 'to_writeoff';
+
+        let nextStatus = i.status;
+        if (!hasWriteOffPriority && remainingActive.length === 0 && op.returnToActive !== false) {
+          if (i.status === 'in_repair') {
+            nextStatus = 'active';
+          }
+        }
+
+        const nextCondition =
+          !hasWriteOffPriority && op.newCondition ? op.newCondition : i.condition;
+
+        return {
+          ...i,
+          status: nextStatus,
+          condition: nextCondition,
+          defectReports: nextReports,
+          activeDefectNote: computeActiveDefectNote(nextReports),
+        };
+      });
+
       return {
         ok: true,
         database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, items },
@@ -1881,17 +2061,208 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
     }
 
     case 'BATCH_IMPORT_USERS': {
-      const updatedUsers = [...db.users];
-      op.users.forEach((newUser) => {
-        const idx = updatedUsers.findIndex(
-          (u) => u.email.toLowerCase() === newUser.email.toLowerCase()
+      if (!Array.isArray(op.users) || op.users.length === 0) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: 'Importuojamų darbuotojų sąrašas negali būti tuščias.',
+        };
+      }
+
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+      const batchSeenEmails = new Set<string>();
+      const batchSeenGmails = new Set<string>();
+      const validatedIncoming: User[] = [];
+
+      // Atominė visų eilučių patikra prieš atliekant bet kokius pakeitimus
+      for (let i = 0; i < op.users.length; i++) {
+        const rawUser = op.users[i];
+        const rowLabel = `Įrašas #${i + 1}`;
+        const fullName = rawUser?.fullName?.trim();
+        const email = rawUser?.email?.trim().toLowerCase();
+
+        if (!fullName) {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: `${rowLabel}: trūksta darbuotojo vardo ir pavardės.`,
+          };
+        }
+        if (!email || !emailRegex.test(email)) {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: `${rowLabel} („${fullName}“): neteisingas el. pašto adresas („${rawUser?.email || ''}“).`,
+          };
+        }
+        if (batchSeenEmails.has(email)) {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: `${rowLabel}: pasikartojantis el. paštas „${email}“ tame pačiame importe.`,
+          };
+        }
+        batchSeenEmails.add(email);
+
+        const allowedGmail = rawUser.allowedGmail?.trim().toLowerCase() || undefined;
+        if (allowedGmail) {
+          if (!emailRegex.test(allowedGmail)) {
+            return {
+              ok: false,
+              statusCode: 400,
+              error: `${rowLabel} („${fullName}“): neteisingas papildomas Gmail adresas „${allowedGmail}“.`,
+            };
+          }
+          if (batchSeenGmails.has(allowedGmail)) {
+            return {
+              ok: false,
+              statusCode: 400,
+              error: `${rowLabel}: pasikartojantis leidžiamas Gmail „${allowedGmail}“ tame pačiame importe.`,
+            };
+          }
+          batchSeenGmails.add(allowedGmail);
+        }
+
+        if (rawUser.departmentId) {
+          const dept = db.departments.find((d) => d.id === rawUser.departmentId);
+          if (!dept) {
+            return {
+              ok: false,
+              statusCode: 400,
+              error: `${rowLabel} („${fullName}“): nurodytas neegzistuojantis skyrius „${rawUser.departmentId}“.`,
+            };
+          }
+          if (dept.isArchived) {
+            return {
+              ok: false,
+              statusCode: 400,
+              error: `${rowLabel} („${fullName}“): negalima priskirti archyvuoto skyriaus „${dept.name}“.`,
+            };
+          }
+        }
+
+        const roomIds = getUserAssignedRoomIds(rawUser);
+        for (const rId of roomIds) {
+          const room = db.rooms.find((r) => r.id === rId);
+          if (!room) {
+            return {
+              ok: false,
+              statusCode: 400,
+              error: `${rowLabel} („${fullName}“): nurodytas neegzistuojantis kabinetas „${rId}“.`,
+            };
+          }
+          if (room.isArchived) {
+            return {
+              ok: false,
+              statusCode: 400,
+              error: `${rowLabel} („${fullName}“): negalima priskirti archyvuotos patalpos „${formatRoomName(room)}“.`,
+            };
+          }
+        }
+
+        const existingMatch = db.users.find((u) => u.email.trim().toLowerCase() === email);
+        const gmailOwner = allowedGmail
+          ? db.users.find(
+              (u) =>
+                u.id !== existingMatch?.id &&
+                (u.email.trim().toLowerCase() === allowedGmail ||
+                  (u.allowedGmail && u.allowedGmail.trim().toLowerCase() === allowedGmail))
+            )
+          : undefined;
+        if (gmailOwner) {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: `${rowLabel} („${fullName}“): Gmail „${allowedGmail}“ jau priskirtas darbuotojui „${gmailOwner.fullName}“.`,
+          };
+        }
+
+        const emailInOtherGmail = db.users.find(
+          (u) =>
+            u.id !== existingMatch?.id &&
+            u.allowedGmail &&
+            u.allowedGmail.trim().toLowerCase() === email
         );
-        if (idx !== -1) {
-          updatedUsers[idx] = { ...updatedUsers[idx], ...newUser };
+        if (emailInOtherGmail) {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: `${rowLabel} („${fullName}“): el. paštas „${email}“ jau naudojamas darbuotojo „${emailInOtherGmail.fullName}“ Gmail lauke.`,
+          };
+        }
+
+        validatedIncoming.push({
+          ...rawUser,
+          fullName,
+          email,
+          ...(allowedGmail ? { allowedGmail } : {}),
+          assignedRoomId: roomIds[0] || undefined,
+          assignedRoomIds: roomIds.length > 0 ? roomIds : undefined,
+        });
+      }
+
+      const updatedUsers = [...db.users];
+      const usedIds = new Set(updatedUsers.map((u) => u.id));
+
+      validatedIncoming.forEach((incoming, idx) => {
+        const existingIdx = updatedUsers.findIndex(
+          (u) => u.email.trim().toLowerCase() === incoming.email
+        );
+
+        if (existingIdx !== -1) {
+          const existing = updatedUsers[existingIdx];
+          const incomingRooms = getUserAssignedRoomIds(incoming);
+          const preservedRooms = getUserAssignedRoomIds(existing);
+          const finalRooms = incomingRooms.length > 0 ? incomingRooms : preservedRooms;
+          const finalDept = incoming.departmentId || existing.departmentId;
+          const finalRoleTitle = incoming.roleTitle?.trim() || existing.roleTitle || 'Mokytojas';
+          const finalPhone = incoming.phone?.trim() || existing.phone;
+          const finalGmail = incoming.allowedGmail || existing.allowedGmail;
+
+          updatedUsers[existingIdx] = {
+            ...existing,
+            fullName: incoming.fullName,
+            email: existing.email.trim().toLowerCase(),
+            roleTitle: finalRoleTitle,
+            // Griežta apsauga: masinis CSV importas NIEKADA nekeičia esamų rolių, PIN, aktyvumo ar archyvavimo
+            role: existing.role,
+            pinCode: existing.pinCode,
+            isActive: existing.isArchived ? false : existing.isActive,
+            isArchived: existing.isArchived,
+            ...(finalPhone ? { phone: finalPhone } : {}),
+            ...(finalGmail ? { allowedGmail: finalGmail } : {}),
+            ...(finalDept ? { departmentId: finalDept } : {}),
+            assignedRoomId: finalRooms[0] || undefined,
+            assignedRoomIds: finalRooms.length > 0 ? finalRooms : undefined,
+          };
         } else {
-          updatedUsers.push(newUser);
+          let newId = incoming.id?.trim() || `usr-${Date.now().toString(36)}-${idx}`;
+          while (usedIds.has(newId)) {
+            newId = `${newId}-${Math.random().toString(36).slice(2, 6)}`;
+          }
+          usedIds.add(newId);
+          const finalRooms = getUserAssignedRoomIds(incoming);
+          const inferredDept =
+            incoming.departmentId ||
+            (finalRooms[0] ? db.rooms.find((r) => r.id === finalRooms[0])?.departmentId : undefined);
+
+          updatedUsers.push({
+            id: newId,
+            fullName: incoming.fullName,
+            email: incoming.email,
+            role: 'teacher',
+            roleTitle: incoming.roleTitle?.trim() || 'Mokytojas',
+            ...(inferredDept ? { departmentId: inferredDept } : {}),
+            ...(finalRooms[0] ? { assignedRoomId: finalRooms[0] } : {}),
+            ...(finalRooms.length > 0 ? { assignedRoomIds: finalRooms } : {}),
+            ...(incoming.phone?.trim() ? { phone: incoming.phone.trim() } : {}),
+            ...(incoming.allowedGmail ? { allowedGmail: incoming.allowedGmail } : {}),
+            isActive: true,
+            isArchived: false,
+          });
         }
       });
+
       return {
         ok: true,
         database: { ...db, version: CURRENT_DB_VERSION, exportedAt: nowIso, users: updatedUsers },

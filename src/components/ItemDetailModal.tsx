@@ -24,7 +24,10 @@ import {
   Tablet,
   Cpu,
   HardDrive,
-  AlertTriangle
+  AlertTriangle,
+  Wrench,
+  CheckCircle2,
+  Play
 } from 'lucide-react';
 import { 
   InventoryItem, 
@@ -32,6 +35,9 @@ import {
   Room, 
   User, 
   MovementRecord,
+  OrganizationSettings,
+  DefectReport,
+  ItemCondition,
   ASSET_CLASS_LABELS,
   FUNDING_SOURCE_LABELS,
   LONG_TERM_THRESHOLD,
@@ -42,6 +48,15 @@ import { compressPhoto } from '../utils/imageCompressor';
 import { StorageService } from '../utils/storage';
 import { formatAgeDisplay } from './InventoryListView';
 import { directPrintBrotherLabels } from '../utils/brotherPrinter';
+import { buildItemQrPayload } from '../utils/qrUtils';
+import { DEFAULT_ORGANIZATION_SETTINGS } from '../utils/organization';
+import { getBarcodeValue } from '../utils/labelUtils';
+import {
+  canStartDefectRepair,
+  getActiveDefects,
+  getResolvedDefects,
+} from '../utils/defectUtils';
+import { formatDateTimeVilnius } from '../utils/dateUtils';
 
 interface ItemDetailModalProps {
   item: InventoryItem | null;
@@ -51,10 +66,23 @@ interface ItemDetailModalProps {
   users: User[];
   movements: MovementRecord[];
   currentUser: User;
+  organizationSettings?: OrganizationSettings;
   onEdit: (item: InventoryItem) => void;
   onTransfer: (item: InventoryItem) => void;
   onWriteOff: (item: InventoryItem) => void;
   onReportFault?: (item: InventoryItem) => void;
+  onStartDefectRepair?: (
+    itemId: string,
+    defectId: string,
+    repairNotes?: string
+  ) => Promise<{ ok: boolean; error?: string }> | void;
+  onResolveDefect?: (payload: {
+    itemId: string;
+    defectId: string;
+    resolutionNotes: string;
+    returnToActive?: boolean;
+    newCondition?: ItemCondition;
+  }) => Promise<{ ok: boolean; error?: string }> | void;
 }
 
 export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
@@ -65,45 +93,75 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
   users,
   movements,
   currentUser,
+  organizationSettings,
   onEdit,
   onTransfer,
   onWriteOff,
   onReportFault,
+  onStartDefectRepair,
+  onResolveDefect,
 }) => {
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [isCompressing, setIsCompressing] = useState(false);
   const [photoError, setPhotoError] = useState('');
   const [confirmRemovePhoto, setConfirmRemovePhoto] = useState(false);
   const [activeMediaTab, setActiveMediaTab] = useState<'photo' | 'qr' | 'barcode'>('photo');
+  const [printNotice, setPrintNotice] = useState<{ type: 'info' | 'error'; text: string } | null>(null);
+
+  // Defect & Repair interactive inline state
+  const [activeRepairDefectId, setActiveRepairDefectId] = useState<string | null>(null);
+  const [repairStartNotes, setRepairStartNotes] = useState('');
+  const [activeResolveDefectId, setActiveResolveDefectId] = useState<string | null>(null);
+  const [resolutionNotes, setResolutionNotes] = useState('');
+  const [resolveCondition, setResolveCondition] = useState<'' | ItemCondition>('');
+  const [defectActionError, setDefectActionError] = useState<string | null>(null);
+  const [isDefectSubmitting, setIsDefectSubmitting] = useState(false);
 
   const barcodeRef = useRef<SVGSVGElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
+    setActiveRepairDefectId(null);
+    setActiveResolveDefectId(null);
+    setRepairStartNotes('');
+    setResolutionNotes('');
+    setResolveCondition('');
+    setDefectActionError(null);
+    setPrintNotice(null);
+  }, [item?.id]);
+
+  useEffect(() => {
     if (!item) return;
-    const payload = JSON.stringify({
-      inv: item.inventoryNumber,
-      name: item.name,
-      sn: item.serialNumber || '',
-      school: 'Telšių r. Tryškių Lazdynų Pelėdos gimnazija'
-    });
+    let cancelled = false;
+    const payload = buildItemQrPayload(item);
     QRCode.toDataURL(payload, {
       margin: 1,
       width: 200,
+      errorCorrectionLevel: 'M',
       color: { dark: '#000000', light: '#ffffff' }
-    }).then(setQrDataUrl);
+    }).then((url) => {
+      if (!cancelled) {
+        setQrDataUrl(url);
+      }
+    }).catch((err) => {
+      console.error('QR generation error', err);
+    });
 
-    // Auto default to 'qr' if no photo exists
     if (!item.photoUrl) {
       setActiveMediaTab('photo');
     }
-  }, [item]);
+    return () => {
+      cancelled = true;
+    };
+  }, [item?.id, item?.inventoryNumber, item?.name]);
+
+  const barcodeValue = item ? getBarcodeValue(item) : '';
 
   useEffect(() => {
-    if (barcodeRef.current && item?.inventoryNumber) {
+    if (barcodeRef.current && barcodeValue) {
       try {
-        JsBarcode(barcodeRef.current, item.inventoryNumber, {
+        JsBarcode(barcodeRef.current, barcodeValue, {
           format: 'CODE128',
           width: 1.4,
           height: 38,
@@ -114,7 +172,7 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
         console.error('Barcode error', e);
       }
     }
-  }, [item?.inventoryNumber, activeMediaTab]);
+  }, [barcodeValue, activeMediaTab]);
 
   if (!item) return null;
 
@@ -124,6 +182,11 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
 
   const itemMovements = movements.filter(m => m.itemId === item.id);
   const canManage = currentUser.role === 'admin' || currentUser.role === 'manager';
+
+  const allDefects = item.defectReports || [];
+  const activeDefects = getActiveDefects(item);
+  const resolvedDefects = getResolvedDefects(item);
+  const hasWriteOffPriority = item.status === 'to_writeoff' || item.status === 'written_off';
 
   const downloadQR = () => {
     if (!qrDataUrl) return;
@@ -135,15 +198,77 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
 
   const handleDirectPrintBrother = async () => {
     if (!item) return;
-    await directPrintBrotherLabels({
+    setPrintNotice(null);
+    const result = await directPrintBrotherLabels({
       items: [item],
       rooms,
       departments,
       tapeWidthMm: 36,
       labelLengthMm: 68,
-      codeType: 'qr_code',
-      schoolName: 'TRYŠKIŲ LAZDYNYŲ PELĖDOS GIMN.'
+      codeType: activeMediaTab === 'barcode' ? 'barcode_1d' : 'qr_code',
+      organization: organizationSettings,
+      schoolName: organizationSettings?.name || DEFAULT_ORGANIZATION_SETTINGS.name,
     });
+    if (result.status === 'error') {
+      setPrintNotice({
+        type: 'error',
+        text: result.error || 'Nepavyko atidaryti naršyklės spausdinimo lango.',
+      });
+    } else {
+      setPrintNotice({
+        type: 'info',
+        text: 'Atidarytas naršyklės spausdinimo dialogas (Brother PT-E920BT 36 mm).',
+      });
+    }
+  };
+
+  const handleSubmitStartRepair = async (defectId: string) => {
+    if (!onStartDefectRepair) return;
+    setDefectActionError(null);
+    setIsDefectSubmitting(true);
+    try {
+      const res = await onStartDefectRepair(
+        item.id,
+        defectId,
+        repairStartNotes.trim() || undefined
+      );
+      if (res && !res.ok) {
+        setDefectActionError(res.error || 'Nepavyko pradėti remonto.');
+        return;
+      }
+      setActiveRepairDefectId(null);
+      setRepairStartNotes('');
+    } finally {
+      setIsDefectSubmitting(false);
+    }
+  };
+
+  const handleSubmitResolveDefect = async (defectId: string) => {
+    if (!onResolveDefect) return;
+    if (!resolutionNotes.trim()) {
+      setDefectActionError('Įrašykite sprendimo pastabą (kas buvo atlikta).');
+      return;
+    }
+    setDefectActionError(null);
+    setIsDefectSubmitting(true);
+    try {
+      const res = await onResolveDefect({
+        itemId: item.id,
+        defectId,
+        resolutionNotes: resolutionNotes.trim(),
+        returnToActive: true,
+        ...(resolveCondition ? { newCondition: resolveCondition } : {}),
+      });
+      if (res && !res.ok) {
+        setDefectActionError(res.error || 'Nepavyko užbaigti gedimo.');
+        return;
+      }
+      setActiveResolveDefectId(null);
+      setResolutionNotes('');
+      setResolveCondition('');
+    } finally {
+      setIsDefectSubmitting(false);
+    }
   };
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -364,7 +489,7 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
                 <div className="space-y-2 w-full p-2 bg-white rounded border border-slate-200">
                   <svg ref={barcodeRef} className="max-w-full h-auto mx-auto" />
                   <div className="font-mono text-xs font-bold text-slate-900 tracking-wider">
-                    *{item.inventoryNumber}*
+                    *{barcodeValue}*
                   </div>
                   <button
                     onClick={handleDirectPrintBrother}
@@ -373,6 +498,18 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
                     <Printer className="w-3.5 h-3.5" />
                     <span>Spausdinti (Brother 36 mm)</span>
                   </button>
+                </div>
+              )}
+
+              {printNotice && (activeMediaTab === 'qr' || activeMediaTab === 'barcode') && (
+                <div
+                  className={`w-full text-[11px] rounded px-2 py-1.5 text-left ${
+                    printNotice.type === 'error'
+                      ? 'bg-rose-50 text-rose-800 border border-rose-200'
+                      : 'bg-blue-50 text-blue-900 border border-blue-200'
+                  }`}
+                >
+                  {printNotice.text}
                 </div>
               )}
             </div>
@@ -530,6 +667,283 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
             )}
           </div>
         </div>
+
+        {/* Gedimai ir remonto istorija */}
+        {(allDefects.length > 0 || item.status === 'in_repair') && (
+          <div className="pt-2 border-t border-slate-100 space-y-2.5 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 font-semibold text-slate-800">
+                <Wrench className="w-4 h-4 text-amber-600" />
+                <span>Gedimai ir remonto istorija ({allDefects.length})</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-[11px]">
+                <span className={`px-2 py-0.5 rounded font-semibold border ${
+                  activeDefects.length > 0
+                    ? 'bg-amber-50 text-amber-900 border-amber-300'
+                    : 'bg-slate-50 text-slate-600 border-slate-200'
+                }`}>
+                  Aktyvūs: {activeDefects.length}
+                </span>
+                {resolvedDefects.length > 0 && (
+                  <span className="px-2 py-0.5 rounded font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                    Išspręsta: {resolvedDefects.length}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {hasWriteOffPriority && activeDefects.length > 0 && (
+              <div className="p-2.5 rounded border border-rose-200 bg-rose-50 text-[11px] text-rose-900">
+                <strong>Nurašymo pirmenybė:</strong> Šio turto būsena yra „{item.status === 'written_off' ? 'Nurašytas' : 'Teikiamas nurašyti'}“. Naujo remonto pradėti negalima, kol turtas nėra atmestas iš nurašymo arba atkurtas iš archyvo.
+              </div>
+            )}
+
+            {defectActionError && (
+              <div className="p-2.5 rounded border border-rose-300 bg-rose-50 text-rose-900 text-[11px] font-medium">
+                {defectActionError}
+              </div>
+            )}
+
+            {allDefects.length === 0 && item.status === 'in_repair' ? (
+              <div className="p-2.5 rounded border border-amber-200 bg-amber-50/70 text-[11px] text-amber-900">
+                Turto būsena pažymėta kaip „Remontuojamas“, tačiau atskiro gedimo įrašo istorijoje dar nėra.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {[...allDefects].reverse().map((defect: DefectReport) => {
+                  const isReported = defect.status === 'reported';
+                  const isInRepair = defect.status === 'in_repair';
+                  const isResolved = defect.status === 'resolved';
+                  const repairPermission = canStartDefectRepair(item, defect);
+                  const otherActiveCount = activeDefects.filter((d) => d.id !== defect.id).length;
+
+                  return (
+                    <div
+                      key={defect.id}
+                      className={`p-3 rounded-lg border space-y-2 ${
+                        isResolved
+                          ? 'bg-slate-50 border-slate-200'
+                          : isInRepair
+                          ? 'bg-amber-50/60 border-amber-300'
+                          : 'bg-sky-50/50 border-sky-200'
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                              isResolved
+                                ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                                : isInRepair
+                                ? 'bg-amber-100 text-amber-900 border-amber-300'
+                                : 'bg-sky-100 text-sky-900 border-sky-300'
+                            }`}
+                          >
+                            {isResolved ? 'Išspręsta' : isInRepair ? 'Remontuojamas' : 'Pranešta'}
+                          </span>
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                              defect.severity === 'high'
+                                ? 'bg-rose-100 text-rose-800'
+                                : defect.severity === 'medium'
+                                ? 'bg-amber-100 text-amber-800'
+                                : 'bg-slate-200 text-slate-700'
+                            }`}
+                          >
+                            {defect.severity === 'high'
+                              ? 'Skubus'
+                              : defect.severity === 'medium'
+                              ? 'Vidutinis'
+                              : 'Nedidelis'}
+                          </span>
+                        </div>
+                        <span className="text-[11px] font-mono text-slate-500">
+                          {formatDateTimeVilnius(defect.reportedAt)}
+                        </span>
+                      </div>
+
+                      <div className="text-xs font-medium text-slate-900">{defect.description}</div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600">
+                        <span>Pranešė: <strong>{defect.reportedByUserName}</strong></span>
+                        {defect.photoUrl && (
+                          <a
+                            href={defect.photoUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 text-blue-600 hover:underline font-medium"
+                          >
+                            <ImageIcon className="w-3 h-3" />
+                            <span>Defekto nuotrauka</span>
+                          </a>
+                        )}
+                      </div>
+
+                      {defect.repairStartedAt && (
+                        <div className="p-2 rounded bg-amber-100/60 border border-amber-200 text-[11px] text-amber-950 space-y-0.5">
+                          <div>
+                            <strong>Remontas pradėtas:</strong> {formatDateTimeVilnius(defect.repairStartedAt)}
+                            {defect.repairStartedByUserName ? ` · Kas: ${defect.repairStartedByUserName}` : ''}
+                          </div>
+                          {defect.repairNotes && <div>Remonto pastaba: {defect.repairNotes}</div>}
+                        </div>
+                      )}
+
+                      {defect.resolvedAt && (
+                        <div className="p-2 rounded bg-emerald-100/60 border border-emerald-200 text-[11px] text-emerald-950 space-y-0.5">
+                          <div>
+                            <strong>Išspręsta:</strong> {formatDateTimeVilnius(defect.resolvedAt)}
+                            {defect.resolvedByUserName ? ` · Kas: ${defect.resolvedByUserName}` : ''}
+                          </div>
+                          {defect.resolutionNotes && <div>Atlikti darbai: {defect.resolutionNotes}</div>}
+                        </div>
+                      )}
+
+                      {canManage && !isResolved && (
+                        <div className="pt-1 space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            {isReported && onStartDefectRepair && (
+                              <button
+                                type="button"
+                                disabled={!repairPermission.allowed || isDefectSubmitting}
+                                title={repairPermission.reason}
+                                onClick={() => {
+                                  setDefectActionError(null);
+                                  setActiveResolveDefectId(null);
+                                  setActiveRepairDefectId(
+                                    activeRepairDefectId === defect.id ? null : defect.id
+                                  );
+                                  setRepairStartNotes('');
+                                }}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-bold bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
+                              >
+                                <Play className="w-3 h-3" />
+                                <span>Pradėti remontą</span>
+                              </button>
+                            )}
+
+                            {onResolveDefect && (
+                              <button
+                                type="button"
+                                disabled={isDefectSubmitting}
+                                onClick={() => {
+                                  setDefectActionError(null);
+                                  setActiveRepairDefectId(null);
+                                  setActiveResolveDefectId(
+                                    activeResolveDefectId === defect.id ? null : defect.id
+                                  );
+                                  setResolutionNotes('');
+                                  setResolveCondition('');
+                                }}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-45 cursor-pointer"
+                              >
+                                <CheckCircle2 className="w-3 h-3" />
+                                <span>Užbaigti gedimą</span>
+                              </button>
+                            )}
+                          </div>
+
+                          {isReported && !repairPermission.allowed && repairPermission.reason && (
+                            <div className="text-[11px] text-rose-700 font-medium">
+                              {repairPermission.reason}
+                            </div>
+                          )}
+
+                          {activeRepairDefectId === defect.id && (
+                            <div className="p-2.5 bg-white border border-amber-300 rounded space-y-2">
+                              <label className="block text-[11px] font-semibold text-slate-700">
+                                Remonto pastaba (neprivaloma):
+                              </label>
+                              <input
+                                type="text"
+                                value={repairStartNotes}
+                                onChange={(e) => setRepairStartNotes(e.target.value)}
+                                placeholder="pvz., Perduota IT specialistui diagnostikai..."
+                                className="w-full border border-slate-300 rounded px-2 py-1 text-xs"
+                              />
+                              <div className="flex justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setActiveRepairDefectId(null)}
+                                  className="px-2.5 py-1 text-[11px] text-slate-600 bg-slate-100 rounded cursor-pointer"
+                                >
+                                  Atšaukti
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isDefectSubmitting}
+                                  onClick={() => void handleSubmitStartRepair(defect.id)}
+                                  className="px-3 py-1 text-[11px] font-bold text-white bg-amber-600 hover:bg-amber-700 rounded cursor-pointer"
+                                >
+                                  Patvirtinti remonto pradžią
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {activeResolveDefectId === defect.id && (
+                            <div className="p-2.5 bg-white border border-emerald-300 rounded space-y-2">
+                              <label className="block text-[11px] font-semibold text-slate-700">
+                                Sprendimo pastaba / kas atlikta *
+                              </label>
+                              <textarea
+                                rows={2}
+                                value={resolutionNotes}
+                                onChange={(e) => setResolutionNotes(e.target.value)}
+                                placeholder="pvz., Pakeistas maitinimo blokas, įrenginys patikrintas ir veikia."
+                                className="w-full border border-slate-300 rounded px-2 py-1 text-xs"
+                              />
+                              {!hasWriteOffPriority && (
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 items-center">
+                                  <label className="text-[11px] text-slate-600">
+                                    Atnaujinti būklę po remonto (nebūtina):
+                                  </label>
+                                  <select
+                                    value={resolveCondition}
+                                    onChange={(e) => setResolveCondition(e.target.value as '' | ItemCondition)}
+                                    className="border border-slate-300 rounded px-2 py-1 text-xs bg-white"
+                                  >
+                                    <option value="">Palikti esamą</option>
+                                    <option value="new">Nauja</option>
+                                    <option value="good">Gera</option>
+                                    <option value="fair">Patenkinama</option>
+                                    <option value="poor">Prasta</option>
+                                  </select>
+                                </div>
+                              )}
+                              {otherActiveCount > 0 && (
+                                <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                                  Pastaba: daiktas dar turi {otherActiveCount} kitą(-us) aktyvų(-ius) gedimą(-us), todėl į aktyvią būseną automatiškai negrįš, kol neišspręsti visi gedimai.
+                                </div>
+                              )}
+                              <div className="flex justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setActiveResolveDefectId(null)}
+                                  className="px-2.5 py-1 text-[11px] text-slate-600 bg-slate-100 rounded cursor-pointer"
+                                >
+                                  Atšaukti
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isDefectSubmitting || !resolutionNotes.trim()}
+                                  onClick={() => void handleSubmitResolveDefect(defect.id)}
+                                  className="px-3 py-1 text-[11px] font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-45 rounded cursor-pointer"
+                                >
+                                  Patvirtinti užbaigimą
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Write-off, Restoration & Rejection History */}
         {((item.writeOffHistory && item.writeOffHistory.length > 0) ||

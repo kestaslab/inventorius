@@ -231,7 +231,17 @@ function validateDefectReports(
     if (r.status !== 'reported' && r.status !== 'in_repair' && r.status !== 'resolved') {
       return { ok: false, error: `${context} -> defectReports[${i}]: neteisingas „status“ tipas.` };
     }
-    if (!isOptionalString(r.photoUrl) || !isOptionalString(r.resolutionNotes)) {
+    if (
+      !isOptionalString(r.photoUrl) ||
+      !isOptionalString(r.repairStartedAt) ||
+      !isOptionalString(r.repairStartedByUserId) ||
+      !isOptionalString(r.repairStartedByUserName) ||
+      !isOptionalString(r.repairNotes) ||
+      !isOptionalString(r.resolvedAt) ||
+      !isOptionalString(r.resolvedByUserId) ||
+      !isOptionalString(r.resolvedByUserName) ||
+      !isOptionalString(r.resolutionNotes)
+    ) {
       return { ok: false, error: `${context} -> defectReports[${i}]: neteisingas papildomų laukų tipas.` };
     }
     reports.push(r as unknown as DefectReport);

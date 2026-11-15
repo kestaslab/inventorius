@@ -94,13 +94,36 @@
 - **A4 spausdinimo stiliai (`src/index.css`, `src/components/Sidebar.tsx`, `src/components/ReportsView.tsx`, `src/components/AuditView.tsx`, `src/components/MovementsView.tsx`):**
   - Pritaikytos `@media print` A4 taisyklės, panaikinančios ekrano `h-screen overflow-hidden` ir modalų `max-h-[94vh]` apkarpymą, paslepiančios navigaciją/mygtukus/foninius elementus ir įgalinančios daugiapuslapį lentelių spausdinimą su pasikartojančiu `thead`. (Fizinis / naršyklės spausdinimo dialogo vaizdas nebuvo vizualiai tikrinamas, nes aplinkoje nėra įdiegto Chromium/Playwright.)
 
+### 6 etapas – Gedimai, etiketės ir darbuotojų importas (Atlikta)
+- **Gedimų ir remonto gyvavimo ciklas (`src/types/inventory.ts`, `src/utils/defectUtils.ts`, `src/utils/dbOperations.ts`, `src/utils/databaseValidation.ts`, `src/components/ReportFaultModal.tsx`, `src/components/ItemDetailModal.tsx`, `src/components/InventoryListView.tsx`, `src/App.tsx`):**
+  - Griežtai atskirtos būsenos `Pranešta` (`reported`), `Remontuojamas` (`in_repair`) ir `Išspręsta` (`resolved`).
+  - Naujo gedimo registravimas (`SAVE_FAULT_REPORT`) neperjungia turto būsenos į `in_repair`, neblogina būklės (`condition`) ir neteršia bendrų pastabų (`notes`).
+  - Pridėtos serverio operacijos `START_DEFECT_REPAIR` (užfiksuoja pradėjusį asmenį, datą, pastabas) ir `RESOLVE_DEFECT` (reikalauja privalomų sprendimo pastabų, išsaugo išsprendusį asmenį ir laiką).
+  - Išsaugoma visa gedimų istorija (`defectReports`); išspręsti gedimai neskaičiuojami kaip aktyvūs (`getActiveDefects`). Turint kelis gedimus, vieno užbaigimas neišvalo kitų aktyvių gedimų ir grąžina daiktą į `active` tik tada, kai nelieka nei vieno aktyvaus gedimo.
+  - Nurašymo ir archyvo būsenos (`to_writeoff`, `written_off`) turi griežtą pirmenybę: gedimo pranešimas ar sprendimas jų neperrašo į `in_repair` / `active`, o remonto pradžia tokiam turtui atmetama su `409 Conflict`.
+  - Visi gedimų ir būsenų keitimai vykdomi serverio mutacijomis su revizijų apsauga (`409 Conflict` lygiagretaus darbo atveju).
+- **„Mano inventorius“ ir šoninės juostos nuoseklumas (`src/utils/defectUtils.ts`, `src/components/MyInventoryView.tsx`, `src/components/Sidebar.tsx`, `src/App.tsx`):**
+  - Bendroje `getMyInventorySummary` / `isItemAssignedToUserScope` funkcijoje suvienodintas priskyrimas pagal asmeninę atsakomybę, `assignedRoomId`/`assignedRoomIds` ir `defaultResponsiblePersonId`.
+  - Šoninės juostos skaitiklis (`myItemsCount`) tiksliai atitinka „Mano inventoriaus“ numatytąjį aktyvių daiktų sąrašą; nurašyti (`written_off`) daiktai pagal nutylėjimą atskirti už atskiro perjungiklio, o išspręsti gedimai neberodomi prie aktyvių įspėjimų.
+- **Etiketės ir spausdinimo eiga (`src/utils/labelUtils.ts`, `src/utils/brotherPrinter.ts`, `src/utils/docxExport.ts`, `src/components/LabelsQRView.tsx`, `src/components/ItemDetailModal.tsx`, `src/components/InventoryListView.tsx`):**
+  - Palaikomi visi trys kodų režimai (`qr_code`, `barcode_1d`, `both`) tiek spausdinime, tiek peržiūroje, tiek OOXML `.docx` eksporte.
+  - QR kodų generavimas suvienodintas su `buildItemQrPayload` (`{ inv, name, school }`) – visi etikečių QR ir 1D brūkšniniai kodai atpažįstami `resolveScannedInventoryItem` skaitytuve.
+  - Realizuotas laukimas `waitForPrintDocumentReady` prieš `print()`, pašalintas aklas `1000 ms` laikmatis bei automatinis žymėjimas uždarius langą ar įvykus klaidai – etiketė pažymima paženklinta (`confirmLabelApplied`) TIK gavus aiškų naudotojo patvirtinimą.
+  - `preSelectedIds` iš registro griežtai riboja atrenkamą sąrašą be tylių papildymų; QR podėlio raktas `getLabelCacheKey` automatiškai atsinaujina pakeitus daikto duomenis; ištaisyta klaida `LAZDYNYŲ` -> `Lazdynų`.
+  - Tikras OOXML `.docx` etikečių dokumentas su įterptais PNG QR/Code128 paveikslėliais (`generateLabelsDocxBlob` / `generateLabelsDocxBuffer`) ir UTF-8 BOM CSV per `buildCsvContent`.
+  - *(Pastaba: gyvas naršyklės spausdinimo dialogo vizualinis vaizdas ir fizinis Brother PT-E920BT spausdintuvo darbas šioje aplinkoje netikrinti dėl naršyklės ir spausdintuvo aparatūros nebuvimo – automatizuotai patikrintas HTML/SVG/PNG/OOXML `.docx` ir QR/1D kodavimo suderinamumas.)*
+- **Darbuotojų CSV importas (`src/utils/userCsvImport.ts`, `src/utils/dbOperations.ts`, `src/components/UsersManagementView.tsx`, `src/App.tsx`):**
+  - Sukurtas pilnas RFC-4180 CSV analizatorius (`parseCsvMatrix`) su UTF-8 BOM, lietuviškomis raidėmis, kabučių ekranavimu (`""`) ir naujomis eilutėmis / skirtukais kabutėse.
+  - Dviejų žingsnių importo peržiūra (`analyzeUsersCsvImport` -> `buildFinalBatchUsersFromPreview`): atskiriami nauji įrašai, atnaujinimai su laukų pokyčiais, praleidžiamos dublikatų/kolizijų eilutės ir dviprasmiški atvejai (pvz., keli kabinetai su tuo pačiu numeriu skirtinguose skyriuose niekada automatiškai neparenkami).
+  - Tušti ar praleisti CSV langeliai išsaugo esamus darbuotojo duomenis ir `assignedRoomIds`; palaikomi keli kabinetai; atnaujinant paštą tikrinama be raidžių registro skirtumo; archyvuoti darbuotojai išlieka archyvuoti ir neaktyvūs.
+  - Masinis importas (`BATCH_IMPORT_USERS`) serveryje yra atominis („viskas arba nieko“) ir **niekada** nekeičia esamų naudotojų `role`, `pinCode`, `isActive` ar `isArchived` laukų (palikta aiški saugumo pastaba dėl ignoruojamų `Rolė`/`PIN` stulpelių).
+
 ### Patikrų rezultatai
-- `npx tsx --test tests/stage1-storage.test.ts tests/stage2-editing-relations.test.ts tests/stage3-writeoff-restore.test.ts tests/stage3-queue-and-history.test.ts tests/stage4-audit-qr.test.ts tests/stage5-reports-summaries.test.ts` – **34/34 testai sėkmingi**.
+- `npx tsx --test tests/stage1-storage.test.ts tests/stage2-editing-relations.test.ts tests/stage3-writeoff-restore.test.ts tests/stage3-queue-and-history.test.ts tests/stage4-audit-qr.test.ts tests/stage5-reports-summaries.test.ts tests/stage6-defects-labels-users.test.ts` – **45/45 testai sėkmingi** (įskaitant 11 naujų 6 etapo testų).
 - `npm run build` (`compile_applet`) ir `npm run lint` (`tsc --noEmit`) – sėkmingi be klaidų.
 
 ---
 
 ## Likę etapai
 
-- 6 – gedimai, etiketės ir darbuotojų importas
 - 7 – diegimas ir galutinė patikra

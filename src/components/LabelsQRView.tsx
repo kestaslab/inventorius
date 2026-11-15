@@ -1,51 +1,66 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import QRCode from 'qrcode';
 import JsBarcode from 'jsbarcode';
-import { 
-  Filter, 
-  CheckSquare, 
-  Square, 
-  Download, 
-  FileText, 
-  FileSpreadsheet, 
-  Tag, 
-  QrCode, 
-  Printer, 
-  Sparkles, 
-  Info, 
-  HelpCircle, 
-  Bluetooth, 
-  ChevronDown, 
-  ChevronUp, 
-  Check, 
-  ChevronRight, 
-  ChevronLeft, 
-  Search, 
-  Layers, 
-  CheckCircle2, 
-  ArrowRight,
-  RotateCcw
+import {
+  Download,
+  FileText,
+  FileSpreadsheet,
+  Tag,
+  QrCode,
+  Printer,
+  Info,
+  HelpCircle,
+  ChevronDown,
+  ChevronUp,
+  Check,
+  ChevronRight,
+  ChevronLeft,
+  Search,
+  AlertTriangle,
+  Barcode as BarcodeIcon,
+  XCircle,
 } from 'lucide-react';
-import { InventoryItem, Department, Room, formatRoomName } from '../types/inventory';
+import {
+  InventoryItem,
+  Department,
+  Room,
+  OrganizationSettings,
+  formatRoomName,
+} from '../types/inventory';
 import { directPrintBrotherLabels } from '../utils/brotherPrinter';
 import { buildItemQrPayload } from '../utils/qrUtils';
+import { DEFAULT_ORGANIZATION_SETTINGS } from '../utils/organization';
+import { buildCsvContent } from '../utils/csvUtils';
+import {
+  CODE_TYPE_LABELS,
+  CodeType,
+  LabelLength,
+  LabelPrintState,
+  TapeWidth,
+  applyPrintDialogOutcome,
+  confirmLabelApplied,
+  filterLabelItems,
+  getBarcodeValue,
+  getLabelCacheKey,
+  unmarkLabelApplied,
+} from '../utils/labelUtils';
+import { generateLabelsDocxBlob, getLabelsDocxFilename } from '../utils/docxExport';
 
 interface LabelsQRViewProps {
   items: InventoryItem[];
   departments: Department[];
   rooms: Room[];
   preSelectedIds?: string[];
+  organizationSettings?: OrganizationSettings;
+  onClearPreselection?: () => void;
 }
 
-export type TapeWidth = 36 | 24 | 18;
-export type LabelLength = 68 | 80 | 50;
-export type CodeType = 'qr_code' | 'barcode_1d' | 'both';
+export type { TapeWidth, LabelLength, CodeType };
 
-// Helper component for 1D barcode
-const BarcodeItem: React.FC<{ value: string; height?: number; width?: number }> = ({ 
-  value, 
-  height = 24, 
-  width = 1.1 
+const BarcodeItem: React.FC<{ value: string; height?: number; width?: number }> = ({
+  value,
+  height = 24,
+  width = 1.1,
 }) => {
   const svgRef = useRef<SVGSVGElement | null>(null);
 
@@ -73,49 +88,70 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
   departments,
   rooms,
   preSelectedIds,
+  organizationSettings,
+  onClearPreselection,
 }) => {
-  // Main view mode: 'single_station' (1-by-1 print & stick workflow) or 'batch_export' (DOCX / Excel list)
   const [viewMode, setViewMode] = useState<'single_station' | 'batch_export'>('single_station');
+
+  // Preselection state: strictly honors items selected from InventoryListView until user clears
+  const [usePreselection, setUsePreselection] = useState<boolean>(() =>
+    Boolean(preSelectedIds && preSelectedIds.length > 0)
+  );
 
   // Filters
   const [selectedDeptId, setSelectedDeptId] = useState<string>('all');
   const [selectedRoomId, setSelectedRoomId] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState<string>('');
 
-  // Brother PT-E920BT settings: 36 mm tape is default!
+  // Brother PT-E920BT settings
   const [tapeWidth, setTapeWidth] = useState<TapeWidth>(36);
   const [labelLength, setLabelLength] = useState<LabelLength>(68);
   const [codeType, setCodeType] = useState<CodeType>('qr_code');
 
   // UI helpers
   const [showGuide, setShowGuide] = useState<boolean>(false);
-  const [isPrinting, setIsPrinting] = useState<boolean>(false);
-  const [printToast, setPrintToast] = useState<{ id: string; message: string } | null>(null);
+  const [printState, setPrintState] = useState<LabelPrintState>({ status: 'idle' });
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [isExportingDocx, setIsExportingDocx] = useState<boolean>(false);
 
-  // Set of items labeled / printed during this session
+  // Set of items confirmed as labeled during this session
   const [labeledItemIds, setLabeledItemIds] = useState<Set<string>>(new Set());
-
-  // Auto-advance to next item after printing
   const [autoAdvance, setAutoAdvance] = useState<boolean>(true);
 
-  // Filter items (only active / not written off)
-  const activeItems = useMemo(() => {
-    return items.filter(item => {
-      if (item.status === 'written_off') return false;
-      if (selectedDeptId !== 'all' && item.departmentId !== selectedDeptId) return false;
-      if (selectedRoomId !== 'all' && item.roomId !== selectedRoomId) return false;
-      if (searchTerm.trim()) {
-        const q = searchTerm.toLowerCase();
-        const matchInv = item.inventoryNumber.toLowerCase().includes(q);
-        const matchName = item.name.toLowerCase().includes(q);
-        const matchSn = item.serialNumber?.toLowerCase().includes(q);
-        if (!matchInv && !matchName && !matchSn) return false;
-      }
-      return true;
-    });
-  }, [items, selectedDeptId, selectedRoomId, searchTerm]);
+  // Batch Selection state for export mode
+  const [selectedBatchIds, setSelectedBatchIds] = useState<Set<string>>(() =>
+    preSelectedIds && preSelectedIds.length > 0 ? new Set(preSelectedIds) : new Set()
+  );
 
-  // Current focused item in 1-by-1 station
+  // React to new preSelectedIds coming from InventoryListView
+  useEffect(() => {
+    if (preSelectedIds && preSelectedIds.length > 0) {
+      setUsePreselection(true);
+      setSelectedDeptId('all');
+      setSelectedRoomId('all');
+      setSearchTerm('');
+      setFocusedItemId(preSelectedIds[0]);
+      setSelectedBatchIds(new Set(preSelectedIds));
+      setPrintState({ status: 'idle' });
+    } else {
+      setUsePreselection(false);
+    }
+  }, [preSelectedIds]);
+
+  const schoolDisplayName =
+    organizationSettings?.name?.trim() || DEFAULT_ORGANIZATION_SETTINGS.name;
+
+  // Filtered active items (never includes written_off; honors preSelectedIds strictly)
+  const activeItems = useMemo(() => {
+    return filterLabelItems(items, {
+      preSelectedIds,
+      usePreselection,
+      departmentId: selectedDeptId,
+      roomId: selectedRoomId,
+      searchTerm,
+    });
+  }, [items, preSelectedIds, usePreselection, selectedDeptId, selectedRoomId, searchTerm]);
+
   const [focusedItemId, setFocusedItemId] = useState<string>(() => {
     if (preSelectedIds && preSelectedIds.length > 0) return preSelectedIds[0];
     return activeItems[0]?.id || '';
@@ -123,40 +159,45 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
 
   // Sync focused item if filter changed and current focused item is no longer in list
   useEffect(() => {
-    if (activeItems.length > 0 && !activeItems.some(i => i.id === focusedItemId)) {
+    if (activeItems.length > 0 && !activeItems.some((i) => i.id === focusedItemId)) {
       setFocusedItemId(activeItems[0].id);
+      setPrintState({ status: 'idle' });
     }
   }, [activeItems, focusedItemId]);
 
   const focusedItem = useMemo(() => {
-    return activeItems.find(i => i.id === focusedItemId) || activeItems[0] || null;
+    return activeItems.find((i) => i.id === focusedItemId) || activeItems[0] || null;
   }, [activeItems, focusedItemId]);
 
   const focusedItemIndex = useMemo(() => {
     if (!focusedItem) return -1;
-    return activeItems.findIndex(i => i.id === focusedItem.id);
+    return activeItems.findIndex((i) => i.id === focusedItem.id);
   }, [activeItems, focusedItem]);
 
-  // Cached QR code data URLs (Base64)
+  // Cached QR DataURLs keyed by getLabelCacheKey(item) so inventoryNumber/name edits invalidate cache automatically
   const [qrMap, setQrMap] = useState<Record<string, string>>({});
 
-  // Generate QR for focused item and visible items
   useEffect(() => {
     let isMounted = true;
     async function generateQRs() {
-      const itemsToGen = focusedItem ? [focusedItem, ...activeItems.slice(0, 15)] : activeItems.slice(0, 15);
+      if (codeType === 'barcode_1d') return;
+      const itemsToGen = focusedItem
+        ? [focusedItem, ...activeItems.slice(0, 20)]
+        : activeItems.slice(0, 20);
       const newMap: Record<string, string> = {};
 
       for (const item of itemsToGen) {
-        if (!qrMap[item.id]) {
+        const cacheKey = getLabelCacheKey(item);
+        if (!qrMap[cacheKey]) {
           try {
             const payload = buildItemQrPayload(item);
-            newMap[item.id] = await QRCode.toDataURL(payload, {
+            const dataUrl = await QRCode.toDataURL(payload, {
               margin: 0,
               width: 180,
               errorCorrectionLevel: 'M',
               color: { dark: '#000000', light: '#ffffff' },
             });
+            newMap[cacheKey] = dataUrl;
           } catch (e) {
             console.error('QR generation error', e);
           }
@@ -164,166 +205,136 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
       }
 
       if (isMounted && Object.keys(newMap).length > 0) {
-        setQrMap(prev => ({ ...prev, ...newMap }));
+        setQrMap((prev) => ({ ...prev, ...newMap }));
       }
     }
 
-    generateQRs();
-    return () => { isMounted = false; };
-  }, [focusedItem, activeItems]);
+    void generateQRs();
+    return () => {
+      isMounted = false;
+    };
+  }, [focusedItem, activeItems, codeType, qrMap]);
 
-  // Single Print handler: Prints ONLY 1 label directly to Brother PT-E920BT
   const handlePrintSingle = async (itemToPrint?: InventoryItem) => {
     const target = itemToPrint || focusedItem;
     if (!target) return;
 
-    setIsPrinting(true);
-    setPrintToast({
-      id: target.id,
-      message: `Spausdinama: ${target.inventoryNumber} (${target.name})...`
+    setPrintState({ status: 'preparing', targetItemId: target.id });
+
+    const result = await directPrintBrotherLabels({
+      items: [target],
+      rooms,
+      departments,
+      tapeWidthMm: tapeWidth,
+      labelLengthMm: labelLength,
+      codeType,
+      qrMap,
+      organization: organizationSettings,
+      schoolName: schoolDisplayName,
     });
 
-    try {
-      await directPrintBrotherLabels({
-        items: [target],
-        rooms,
-        departments,
-        tapeWidthMm: tapeWidth,
-        labelLengthMm: labelLength,
-        codeType,
-        qrMap,
-        schoolName: 'TRYŠKIŲ LAZDYNYŲ PELĖDOS GIMN.'
-      });
+    setPrintState(applyPrintDialogOutcome(result, target.id));
+  };
 
-      // Mark as labeled
-      setLabeledItemIds(prev => new Set(prev).add(target.id));
-
-      setTimeout(() => {
-        setPrintToast({
-          id: target.id,
-          message: `Atspausdinta! Užklijuokite ant ${target.name}.`
-        });
-        setTimeout(() => setPrintToast(null), 4000);
-
-        // Auto-advance to next item if enabled
-        if (autoAdvance) {
-          const currentIndex = activeItems.findIndex(i => i.id === target.id);
-          if (currentIndex !== -1 && currentIndex + 1 < activeItems.length) {
-            setFocusedItemId(activeItems[currentIndex + 1].id);
-          }
-        }
-      }, 1000);
-    } catch (e) {
-      console.error('Print single error', e);
-      setPrintToast(null);
-    } finally {
-      setIsPrinting(false);
+  const handleConfirmLabelApplied = (itemId: string) => {
+    setLabeledItemIds((prev) => confirmLabelApplied(prev, itemId));
+    setPrintState({ status: 'idle' });
+    if (autoAdvance) {
+      const currentIndex = activeItems.findIndex((i) => i.id === itemId);
+      if (currentIndex !== -1 && currentIndex + 1 < activeItems.length) {
+        setFocusedItemId(activeItems[currentIndex + 1].id);
+      }
     }
   };
 
   const handleNextItem = () => {
     if (focusedItemIndex !== -1 && focusedItemIndex + 1 < activeItems.length) {
       setFocusedItemId(activeItems[focusedItemIndex + 1].id);
+      setPrintState({ status: 'idle' });
     }
   };
 
   const handlePrevItem = () => {
     if (focusedItemIndex > 0) {
       setFocusedItemId(activeItems[focusedItemIndex - 1].id);
+      setPrintState({ status: 'idle' });
     }
   };
 
-  // Batch Selection state for export mode
-  const [selectedBatchIds, setSelectedBatchIds] = useState<Set<string>>(new Set());
+  const handleResetPreselection = () => {
+    setUsePreselection(false);
+    setSelectedBatchIds(new Set());
+    onClearPreselection?.();
+  };
 
-  const handleDownloadWordLabels = () => {
-    const listToExport = selectedBatchIds.size > 0 
-      ? activeItems.filter(i => selectedBatchIds.has(i.id))
-      : activeItems;
+  const listToExport = useMemo(() => {
+    const validBatch = selectedBatchIds.size > 0
+      ? activeItems.filter((i) => selectedBatchIds.has(i.id))
+      : [];
+    return validBatch.length > 0 ? validBatch : activeItems;
+  }, [activeItems, selectedBatchIds]);
 
-    if (listToExport.length === 0) return;
-
-    const labelRows = listToExport.map(item => {
-      const qrUrl = qrMap[item.id] || '';
-      const room = rooms.find(r => r.id === item.roomId);
-      const roomName = formatRoomName(room, true);
-
-      return `
-        <div style="page-break-inside: avoid; border: 1.5pt solid #000; width: ${labelLength}mm; height: ${tapeWidth}mm; margin-bottom: 6mm; padding: 2mm 3mm; box-sizing: border-box; font-family: Arial, sans-serif;">
-          <table border="0" cellpadding="0" cellspacing="0" style="width: 100%; height: 100%; border: none;">
-            <tr>
-              <td style="width: 30mm; vertical-align: middle; text-align: center; border: none; padding-right: 2mm;">
-                ${qrUrl ? `<img src="${qrUrl}" width="105" height="105" style="display:block; margin:auto;" />` : `<div style="font-size:8pt;">[QR]</div>`}
-              </td>
-              <td style="vertical-align: middle; border: none;">
-                <div style="font-size: 7pt; font-weight: bold; text-transform: uppercase; color: #333; line-height: 1.1;">TRYŠKIŲ LAZDYNYŲ PELĖDOS GIMN.</div>
-                <div style="font-size: 13pt; font-weight: bold; font-family: 'Courier New', monospace; margin: 2pt 0 1pt 0; color: #000; letter-spacing: -0.5pt;">${item.inventoryNumber}</div>
-                <div style="font-size: 8.5pt; font-weight: 600; color: #111; line-height: 1.1; max-height: 22pt; overflow: hidden;">${item.name}</div>
-                <div style="font-size: 7.5pt; color: #555; margin-top: 2pt;">${roomName}</div>
-              </td>
-            </tr>
-          </table>
-        </div>
-      `;
-    }).join('');
-
-    const html = `<!DOCTYPE html>
-<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
-<head>
-  <meta charset='utf-8'>
-  <title>Tryskiu_Mokyklos_Etiketes_${tapeWidth}mm</title>
-  <style>
-    @page { size: A4; margin: 15mm 15mm; }
-    body { font-family: Arial, sans-serif; }
-  </style>
-</head>
-<body>
-  <div style="text-align: center; margin-bottom: 15pt; font-size: 10pt; color: #666;">
-    <b>Tryškių Lazdynų Pelėdos gimnazija</b> · Brother PT-E920BT ${tapeWidth}mm etiketės (${listToExport.length} vnt.)
-  </div>
-  <table border="0" style="border:none; width: 100%;">
-    <tr>
-      <td style="border:none; vertical-align: top;">
-        ${labelRows}
-      </td>
-    </tr>
-  </table>
-</body>
-</html>`;
-
-    const blob = new Blob(['\uFEFF' + html], { type: 'application/msword;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `tryskiai-etiketes-brother-${tapeWidth}mm-${new Date().toISOString().slice(0, 10)}.docx`;
-    a.click();
-    URL.revokeObjectURL(url);
+  const handleDownloadWordLabels = async () => {
+    if (listToExport.length === 0 || isExportingDocx) return;
+    setExportError(null);
+    setIsExportingDocx(true);
+    try {
+      const blob = await generateLabelsDocxBlob({
+        items: listToExport,
+        rooms,
+        departments,
+        tapeWidthMm: tapeWidth,
+        labelLengthMm: labelLength,
+        codeType,
+        organization: organizationSettings,
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = getLabelsDocxFilename(tapeWidth, codeType);
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setExportError(
+        err instanceof Error
+          ? err.message
+          : 'Nepavyko sugeneruoti tikro DOCX etikečių failo.'
+      );
+    } finally {
+      setIsExportingDocx(false);
+    }
   };
 
   const handleDownloadExcelLabels = () => {
-    const listToExport = selectedBatchIds.size > 0 
-      ? activeItems.filter(i => selectedBatchIds.has(i.id))
-      : activeItems;
-
     if (listToExport.length === 0) return;
-
-    const header = ['Inventorinis numeris', 'Turto pavadinimas', 'Kabinetas', 'Skyrius', 'Juostos plotis', 'QR kodo turinys'].join(';');
-    const rows = listToExport.map(item => {
-      const room = rooms.find(r => r.id === item.roomId);
-      const dept = departments.find(d => d.id === item.departmentId);
-      const roomStr = formatRoomName(room);
-      const payload = buildItemQrPayload(item);
+    setExportError(null);
+    const headers = [
+      'Inventorinis numeris',
+      'Turto pavadinimas',
+      'Kabinetas',
+      'Skyrius',
+      'Juostos plotis',
+      'Etiketės ilgis',
+      'Kodo tipas',
+      '1D brūkšninio kodo reikšmė',
+      'QR kodo turinys',
+    ];
+    const rows = listToExport.map((item) => {
+      const room = rooms.find((r) => r.id === item.roomId);
+      const dept = departments.find((d) => d.id === item.departmentId);
       return [
-        `"${item.inventoryNumber}"`,
-        `"${item.name.replace(/"/g, '""')}"`,
-        `"${roomStr}"`,
-        `"${dept?.name || ''}"`,
-        `"${tapeWidth} mm"`,
-        `"${payload.replace(/"/g, '""')}"`
-      ].join(';');
+        item.inventoryNumber,
+        item.name,
+        formatRoomName(room),
+        dept?.name || '',
+        `${tapeWidth} mm`,
+        `${labelLength} mm`,
+        CODE_TYPE_LABELS[codeType],
+        getBarcodeValue(item),
+        buildItemQrPayload(item),
+      ];
     });
-
-    const csv = '\uFEFF' + [header, ...rows].join('\r\n');
+    const csv = buildCsvContent(headers, rows, ';');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -333,32 +344,20 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
     URL.revokeObjectURL(url);
   };
 
-  // Progress count
-  const labeledInActiveCount = activeItems.filter(i => labeledItemIds.has(i.id)).length;
-  const progressPercent = activeItems.length > 0 ? Math.round((labeledInActiveCount / activeItems.length) * 100) : 0;
+  const labeledInActiveCount = activeItems.filter((i) => labeledItemIds.has(i.id)).length;
+  const progressPercent =
+    activeItems.length > 0 ? Math.round((labeledInActiveCount / activeItems.length) * 100) : 0;
+
+  const focusedQrSrc = focusedItem ? qrMap[getLabelCacheKey(focusedItem)] : undefined;
+  const isPrinting = printState.status === 'preparing';
 
   return (
     <div className="space-y-5">
-      {/* Toast Notification */}
-      {printToast && (
-        <div className="fixed top-4 right-4 z-50 bg-slate-900 text-white px-4 py-3 rounded-xl shadow-2xl text-xs flex items-center gap-3 border border-slate-700 animate-in fade-in slide-in-from-top-2">
-          <div className="w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center text-blue-400 shrink-0">
-            <Printer className="w-4 h-4 animate-pulse" />
-          </div>
-          <div>
-            <div className="font-semibold text-white flex items-center gap-1.5">
-              <span>Brother PT-E920BT (36 mm)</span>
-              <span className="text-[10px] px-1.5 py-0.2 bg-blue-500/30 text-blue-300 rounded font-mono">1 vnt.</span>
-            </div>
-            <div className="text-slate-300 text-[11px] mt-0.5">{printToast.message}</div>
-          </div>
-        </div>
-      )}
-
       {/* Top Workflow Mode Switcher */}
       <div className="bg-white border border-slate-300 rounded-xl p-3 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="flex items-center gap-1.5 p-1 bg-slate-100 border border-slate-200 rounded-lg text-xs">
           <button
+            type="button"
             onClick={() => setViewMode('single_station')}
             className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-md font-semibold transition-all cursor-pointer ${
               viewMode === 'single_station'
@@ -367,10 +366,13 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
             }`}
           >
             <Printer className="w-4 h-4 text-blue-600" />
-            <span>Etikečių klijavimo stotis (1 po 1)</span>
-            <span className="px-1.5 py-0.5 bg-blue-100 text-blue-800 rounded text-[10px] font-bold">Rekomenduojama</span>
+            <span>Etikečių spausdinimo stotis (1 po 1)</span>
+            <span className="px-1.5 py-0.5 bg-blue-100 text-blue-800 rounded text-[10px] font-bold">
+              Rekomenduojama
+            </span>
           </button>
           <button
+            type="button"
             onClick={() => setViewMode('batch_export')}
             className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-md font-semibold transition-all cursor-pointer ${
               viewMode === 'batch_export'
@@ -379,16 +381,17 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
             }`}
           >
             <FileText className="w-4 h-4 text-slate-600" />
-            <span>Failų eksportas (Word / Excel sąrašas)</span>
+            <span>Failų eksportas (DOCX / CSV)</span>
           </button>
         </div>
 
         <button
+          type="button"
           onClick={() => setShowGuide(!showGuide)}
           className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-700 hover:text-blue-700 cursor-pointer px-2.5 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-300 rounded-lg shadow-2xs"
         >
           <HelpCircle className="w-4 h-4 text-slate-500" />
-          <span>Brother PT-E920BT tvarkyklės nustatymai</span>
+          <span>Brother PT-E920BT spausdinimo rekomendacijos</span>
           {showGuide ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
         </button>
       </div>
@@ -399,42 +402,64 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
           <div className="font-semibold text-white flex items-center justify-between">
             <span className="flex items-center gap-2">
               <Info className="w-4 h-4 text-blue-400" />
-              Brother PT-E920BT tiesioginio spausdinimo nustatymai:
+              Brother PT-E920BT naršyklės spausdinimo rekomendacijos:
             </span>
-            <span className="text-[11px] text-blue-300 font-mono">TZe 36 mm juosta</span>
+            <span className="text-[11px] text-blue-300 font-mono">
+              TZe {tapeWidth} × {labelLength} mm
+            </span>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-slate-300">
             <div className="bg-white/5 p-3 rounded-lg border border-white/5 space-y-1">
-              <span className="font-bold text-blue-300 block">1. Ryšys ir spausdintuvas</span>
+              <span className="font-bold text-blue-300 block">1. Spausdintuvo pasirinkimas</span>
               <p className="text-[11px] text-slate-400 leading-relaxed">
-                Prijunkite per Bluetooth arba USB kabelį. Spausdinimo lange pasirinkite <strong>Brother PT-E920BT</strong> (arba P-touch).
+                Naršyklės spausdinimo lange pasirinkite įdiegtą sisteminį spausdintuvą (pvz., Brother PT-E920BT per USB arba P-touch tvarkyklę).
               </p>
             </div>
             <div className="bg-white/5 p-3 rounded-lg border border-white/5 space-y-1">
-              <span className="font-bold text-blue-300 block">2. Popieriaus dydis</span>
+              <span className="font-bold text-blue-300 block">2. Juostos dydis ir mastelis</span>
               <p className="text-[11px] text-slate-400 leading-relaxed">
-                Nustatykite juostos plotį į <strong>36 mm</strong> (etiketės ilgis 68 mm).
+                Parinkite juostos plotį ({tapeWidth} mm) ir etiketės ilgį ({labelLength} mm), mastelis 100 % (be pritaikymo lapui).
               </p>
             </div>
             <div className="bg-white/5 p-3 rounded-lg border border-white/5 space-y-1">
-              <span className="font-bold text-blue-300 block">3. Paraštės (Margins: None)</span>
+              <span className="font-bold text-blue-300 block">3. Paraštės ir patvirtinimas</span>
               <p className="text-[11px] text-slate-400 leading-relaxed">
-                Pasirinkite <strong>„None“</strong> (be paraščių), atžymėkite „Headers and footers“. Automatinis giljotinis peiliukas nukirps etiketę.
+                Nustatykite „Margins: None“ ir išjunkite „Headers and footers“. Užklijavus etiketę, ranka patvirtinkite paženklinimą.
               </p>
             </div>
           </div>
         </div>
       )}
 
-      {/* VIEW MODE 1: SINGLE ITEM PRINT & STICK STATION (1 po 1) */}
+      {/* Preselection Banner (when coming from InventoryListView selection) */}
+      {usePreselection && preSelectedIds && preSelectedIds.length > 0 && (
+        <div className="bg-blue-50 border border-blue-300 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs text-blue-950">
+          <div className="flex items-center gap-2">
+            <Tag className="w-4 h-4 text-blue-700 shrink-0" />
+            <span>
+              <strong>Pasirinkta iš inventoriaus sąrašo:</strong> {activeItems.length} vnt. (rodomas tik šis rinkinys).
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={handleResetPreselection}
+            className="px-3 py-1 rounded-md bg-white hover:bg-blue-100 border border-blue-300 text-blue-800 font-semibold cursor-pointer"
+          >
+            Rodyti visą inventorių
+          </button>
+        </div>
+      )}
+
+      {/* VIEW MODE 1: SINGLE ITEM PRINT & STICK STATION */}
       {viewMode === 'single_station' && (
         <div className="space-y-5">
-          {/* Filters Bar: Room & Search */}
+          {/* Filters & Label Settings Bar */}
           <div className="bg-white border border-slate-300 rounded-xl p-4 shadow-xs space-y-3">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-              {/* Department */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 text-xs">
               <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">Skyrius / Korpusas</label>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                  Skyrius / Korpusas
+                </label>
                 <select
                   value={selectedDeptId}
                   onChange={(e) => {
@@ -444,54 +469,111 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
                   className="w-full bg-white border border-slate-300 rounded-md px-2.5 py-1.5 text-slate-900 font-medium focus:ring-1 focus:ring-blue-500 cursor-pointer shadow-2xs"
                 >
                   <option value="all">Visi skyriai</option>
-                  {departments.map(d => (
-                    <option key={d.id} value={d.id}>{d.name}</option>
+                  {departments.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name}
+                    </option>
                   ))}
                 </select>
               </div>
 
-              {/* Room */}
               <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">Kabinetas / Patalpa</label>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                  Kabinetas / Patalpa
+                </label>
                 <select
                   value={selectedRoomId}
                   onChange={(e) => setSelectedRoomId(e.target.value)}
                   className="w-full bg-white border border-slate-300 rounded-md px-2.5 py-1.5 text-slate-900 font-bold focus:ring-1 focus:ring-blue-500 cursor-pointer shadow-2xs"
                 >
                   <option value="all">Visi kabinetai ({activeItems.length} vnt.)</option>
-                  {rooms.map(r => {
-                    const countInRoom = items.filter(i => i.roomId === r.id && i.status !== 'written_off').length;
-                    return (
-                      <option key={r.id} value={r.id}>
-                        {formatRoomName(r)} ({countInRoom} vnt.)
-                      </option>
-                    );
-                  })}
+                  {rooms
+                    .filter((r) => selectedDeptId === 'all' || r.departmentId === selectedDeptId)
+                    .map((r) => {
+                      const countInRoom = items.filter(
+                        (i) => i.roomId === r.id && i.status !== 'written_off'
+                      ).length;
+                      return (
+                        <option key={r.id} value={r.id}>
+                          {formatRoomName(r)} ({countInRoom} vnt.)
+                        </option>
+                      );
+                    })}
                 </select>
               </div>
 
-              {/* Quick Search */}
               <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">Greita paieška (Nr., Pavadinimas, S/N)</label>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                  Greita paieška
+                </label>
                 <div className="relative">
                   <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-2.5" />
                   <input
                     type="text"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
-                    placeholder="pvz., TM-2023 arba Lenovo..."
-                    className="w-full bg-white border border-slate-300 rounded-md pl-8 pr-3 py-1.5 text-xs text-slate-900 font-medium shadow-2xs focus:ring-1 focus:ring-blue-500"
+                    placeholder="Nr., pavad., S/N..."
+                    className="w-full bg-white border border-slate-300 rounded-md pl-8 pr-2.5 py-1.5 text-xs text-slate-900 font-medium shadow-2xs focus:ring-1 focus:ring-blue-500"
                   />
                 </div>
               </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                  Kodo tipas
+                </label>
+                <select
+                  value={codeType}
+                  onChange={(e) => setCodeType(e.target.value as CodeType)}
+                  className="w-full bg-white border border-slate-300 rounded-md px-2.5 py-1.5 text-slate-900 font-semibold focus:ring-1 focus:ring-blue-500 cursor-pointer shadow-2xs"
+                >
+                  <option value="qr_code">{CODE_TYPE_LABELS.qr_code}</option>
+                  <option value="barcode_1d">{CODE_TYPE_LABELS.barcode_1d}</option>
+                  <option value="both">{CODE_TYPE_LABELS.both}</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                  Juostos plotis
+                </label>
+                <select
+                  value={tapeWidth}
+                  onChange={(e) => setTapeWidth(Number(e.target.value) as TapeWidth)}
+                  className="w-full bg-white border border-slate-300 rounded-md px-2.5 py-1.5 text-slate-900 font-medium focus:ring-1 focus:ring-blue-500 cursor-pointer shadow-2xs"
+                >
+                  <option value={36}>36 mm (PT-E920BT)</option>
+                  <option value={24}>24 mm juostelė</option>
+                  <option value={18}>18 mm juostelė</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                  Etiketės ilgis
+                </label>
+                <select
+                  value={labelLength}
+                  onChange={(e) => setLabelLength(Number(e.target.value) as LabelLength)}
+                  className="w-full bg-white border border-slate-300 rounded-md px-2.5 py-1.5 text-slate-900 font-medium focus:ring-1 focus:ring-blue-500 cursor-pointer shadow-2xs"
+                >
+                  <option value={68}>68 mm (Standartinis)</option>
+                  <option value={80}>80 mm (Prailgintas)</option>
+                  <option value={50}>50 mm (Kompaktiškas)</option>
+                </select>
+              </div>
             </div>
 
-            {/* Progress bar across selected cabinet / filtered view */}
+            {/* Progress bar */}
             <div className="pt-2 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
               <div className="flex items-center gap-2">
-                <span className="text-slate-500">Šioje atrankoje paženklinta:</span>
-                <span className="font-semibold text-slate-900">{labeledInActiveCount} iš {activeItems.length}</span>
-                <span className="text-[11px] font-mono text-blue-600 font-bold">({progressPercent}%)</span>
+                <span className="text-slate-500">Patvirtinta užklijuotų šioje atrankoje:</span>
+                <span className="font-semibold text-slate-900 font-mono tabular-nums">
+                  {labeledInActiveCount} iš {activeItems.length}
+                </span>
+                <span className="text-[11px] font-mono tabular-nums text-blue-600 font-bold">
+                  ({progressPercent}%)
+                </span>
               </div>
 
               <div className="flex items-center gap-4">
@@ -502,13 +584,14 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
                     onChange={(e) => setAutoAdvance(e.target.checked)}
                     className="rounded text-blue-600 focus:ring-blue-500"
                   />
-                  <span>Automatiškai pereiti prie kito daikto atspausdinus</span>
+                  <span>Patvirtinus pereiti prie kito daikto</span>
                 </label>
 
                 {labeledItemIds.size > 0 && (
                   <button
+                    type="button"
                     onClick={() => setLabeledItemIds(new Set())}
-                    className="text-[11px] text-slate-400 hover:text-slate-600 cursor-pointer"
+                    className="text-[11px] text-slate-500 hover:text-slate-700 cursor-pointer"
                   >
                     Atstatyti žymėjimus
                   </button>
@@ -517,88 +600,112 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
             </div>
           </div>
 
-          {/* Current Focused Item Printing Hero Card */}
+          {/* Focused Item Hero Card */}
           {focusedItem ? (
             <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 border border-slate-800 rounded-2xl p-6 text-white shadow-xl">
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
-                {/* Left Col (5 cols): Exact 36 mm Label Preview */}
+                {/* Left Col: Accurate Label Preview */}
                 <div className="lg:col-span-5 flex flex-col items-center">
                   <div className="text-[11px] font-mono tracking-wider text-blue-300 mb-2 uppercase flex items-center gap-1.5">
                     <Tag className="w-3.5 h-3.5" />
-                    <span>Tikslus 36 mm juostelės maketas</span>
+                    <span>
+                      {tapeWidth} mm juostelės maketas ({CODE_TYPE_LABELS[codeType]})
+                    </span>
                   </div>
 
-                  {/* 36mm Label Canvas Mockup */}
-                  <div 
-                    className="w-full max-w-[340px] bg-white text-black p-2.5 rounded-sm border-2 border-slate-400 shadow-2xl flex items-center gap-3 relative select-none"
-                    style={{ minHeight: '110px' }}
+                  <div
+                    className="w-full max-w-[350px] bg-white text-black p-2.5 rounded-sm border-2 border-slate-400 shadow-2xl flex items-center gap-3 relative select-none"
+                    style={{ minHeight: codeType === 'both' ? '128px' : '110px' }}
                   >
-                    {/* Left: Crisp QR Code */}
-                    <div className="w-22 h-22 shrink-0 bg-white flex items-center justify-center p-1 border border-slate-200 rounded">
-                      {qrMap[focusedItem.id] ? (
-                        <img 
-                          src={qrMap[focusedItem.id]} 
-                          alt={focusedItem.inventoryNumber} 
-                          className="w-full h-full object-contain" 
-                        />
-                      ) : (
-                        <QrCode className="w-10 h-10 text-slate-300" />
-                      )}
-                    </div>
+                    {(codeType === 'qr_code' || codeType === 'both') && (
+                      <div className="w-22 h-22 shrink-0 bg-white flex items-center justify-center p-1 border border-slate-200 rounded">
+                        {focusedQrSrc ? (
+                          <img
+                            src={focusedQrSrc}
+                            alt={focusedItem.inventoryNumber}
+                            className="w-full h-full object-contain"
+                          />
+                        ) : (
+                          <QrCode className="w-10 h-10 text-slate-300" />
+                        )}
+                      </div>
+                    )}
 
-                    {/* Right: Text layout */}
                     <div className="min-w-0 flex-1 flex flex-col justify-between h-full py-0.5">
                       <div>
                         <div className="text-[8px] font-bold uppercase tracking-wider text-slate-600 truncate">
-                          TRYŠKIŲ LAZDYNYŲ PELĖDOS GIMN.
+                          {schoolDisplayName}
                         </div>
+                        {codeType === 'barcode_1d' && (
+                          <div className="my-1">
+                            <BarcodeItem
+                              value={getBarcodeValue(focusedItem)}
+                              height={28}
+                              width={1.2}
+                            />
+                          </div>
+                        )}
                         <div className="font-mono text-base font-extrabold text-black tracking-tight leading-tight mt-0.5">
                           {focusedItem.inventoryNumber}
                         </div>
                         <div className="text-xs font-bold text-slate-900 line-clamp-2 leading-snug mt-0.5">
                           {focusedItem.name}
                         </div>
+                        {codeType === 'both' && (
+                          <div className="mt-1">
+                            <BarcodeItem
+                              value={getBarcodeValue(focusedItem)}
+                              height={20}
+                              width={1.0}
+                            />
+                          </div>
+                        )}
                       </div>
 
-                      <div className="flex items-center justify-between text-[9px] text-slate-500 font-mono pt-1.5 border-t border-slate-100">
+                      <div className="flex items-center justify-between text-[9px] text-slate-500 font-mono pt-1 border-t border-slate-100 mt-1">
                         <span>
-                          {rooms.find(r => r.id === focusedItem.roomId)?.number || '101'} kab.
+                          {formatRoomName(
+                            rooms.find((r) => r.id === focusedItem.roomId),
+                            true
+                          )}
                         </span>
                         {focusedItem.serialNumber && (
-                          <span className="truncate max-w-[90px]">SN: {focusedItem.serialNumber}</span>
+                          <span className="truncate max-w-[95px]">
+                            SN: {focusedItem.serialNumber}
+                          </span>
                         )}
                       </div>
                     </div>
 
-                    {/* Status Badge overlay on the label */}
                     {labeledItemIds.has(focusedItem.id) && (
-                      <div className="absolute -top-2.5 -right-2.5 bg-emerald-600 text-white rounded-full p-1 shadow-md">
+                      <div
+                        className="absolute -top-2.5 -right-2.5 bg-emerald-600 text-white rounded-full p-1 shadow-md"
+                        title="Patvirtinta kaip užklijuota"
+                      >
                         <Check className="w-4 h-4" />
                       </div>
                     )}
                   </div>
 
                   <div className="text-[10px] text-slate-400 font-mono mt-2">
-                    Formatas: 68 mm × 36 mm · Brother TZe juostelė
+                    Formatas: {labelLength} mm × {tapeWidth} mm · {CODE_TYPE_LABELS[codeType]}
                   </div>
                 </div>
 
-                {/* Right Col (7 cols): Large Direct Print Action & Sequential Controls */}
+                {/* Right Col: Print Controls & Confirmation */}
                 <div className="lg:col-span-7 space-y-4">
-                  {/* Step indicator */}
                   <div className="flex items-center justify-between text-xs text-blue-200">
-                    <span className="font-semibold text-blue-300">
+                    <span className="font-semibold text-blue-300 font-mono tabular-nums">
                       Daiktas {focusedItemIndex + 1} iš {activeItems.length}
                     </span>
                     <span className="text-[11px] text-slate-400">
-                      {rooms.find(r => r.id === focusedItem.roomId)?.name || 'Gimnazija'}
+                      {rooms.find((r) => r.id === focusedItem.roomId)?.name || 'Gimnazija'}
                     </span>
                   </div>
 
-                  {/* Item Title & Specs */}
                   <div>
-                    <h3 className="text-xl font-extrabold text-white tracking-tight flex items-center gap-2">
-                      <span>{focusedItem.name}</span>
+                    <h3 className="text-xl font-extrabold text-white tracking-tight">
+                      {focusedItem.name}
                     </h3>
                     <div className="flex flex-wrap items-center gap-2 mt-1.5 text-xs text-slate-300">
                       <span className="font-mono text-blue-400 font-bold bg-blue-950/60 px-2 py-0.5 rounded border border-blue-800/60">
@@ -609,34 +716,79 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
                       {focusedItem.serialNumber && (
                         <>
                           <span>·</span>
-                          <span className="font-mono text-slate-400">SN: {focusedItem.serialNumber}</span>
+                          <span className="font-mono text-slate-400">
+                            SN: {focusedItem.serialNumber}
+                          </span>
                         </>
                       )}
                     </div>
                   </div>
 
-                  {/* BIG ACTION BUTTON: PRINT THIS 1 LABEL NOW */}
-                  <div className="pt-2">
+                  {/* Print Action Button */}
+                  <div className="pt-1 space-y-2.5">
                     <button
-                      onClick={() => handlePrintSingle(focusedItem)}
+                      type="button"
+                      onClick={() => void handlePrintSingle(focusedItem)}
                       disabled={isPrinting}
-                      className="w-full py-4 px-6 rounded-xl font-extrabold text-base transition-all transform active:scale-98 shadow-lg flex items-center justify-center gap-3 cursor-pointer bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-400 hover:to-indigo-500 text-white"
+                      className="w-full py-3.5 px-6 rounded-xl font-extrabold text-base transition-all shadow-lg flex items-center justify-center gap-3 cursor-pointer bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-400 hover:to-indigo-500 text-white disabled:opacity-60"
                     >
-                      <Printer className="w-6 h-6 animate-pulse" />
+                      <Printer className="w-5 h-5" />
                       <span>
-                        {isPrinting 
-                          ? 'Siunčiama į Brother PT-E920BT...' 
-                          : 'Spausdinti šią etiketę (Brother PT-E920BT)'}
+                        {isPrinting
+                          ? 'Ruošiamas spausdinimo dokumentas...'
+                          : 'Atidaryti spausdinimo dialogą (Brother PT-E920BT)'}
                       </span>
                     </button>
-                    <p className="text-[11px] text-center text-blue-200/80 mt-1.5">
-                      Paspaudus etiketė iškart išlenda iš spausdintuvo ir nusikerpa. Užklijuokite ant daikto!
-                    </p>
+
+                    {/* Explicit Post-Print Confirmation Bar */}
+                    {printState.status === 'awaiting_confirmation' &&
+                      printState.targetItemId === focusedItem.id && (
+                        <div className="p-3 rounded-xl bg-amber-950/70 border border-amber-400/50 text-xs space-y-2">
+                          <div className="font-semibold text-amber-200">
+                            Spausdinimo dialogas uždarytas. Patvirtinkite tik įsitikinę, kad etiketė atsispausdino ir yra užklijuota ant turto:
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleConfirmLabelApplied(focusedItem.id)}
+                              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold cursor-pointer"
+                            >
+                              <Check className="w-4 h-4" />
+                              <span>Patvirtinti ir pažymėti užklijuota</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setPrintState({ status: 'idle' })}
+                              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-slate-200 font-medium cursor-pointer"
+                            >
+                              <XCircle className="w-4 h-4" />
+                              <span>Atšaukta / Nepavyko</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                    {printState.status === 'error' && (
+                      <div className="p-3 rounded-xl bg-rose-950/80 border border-rose-500/60 text-xs text-rose-200 flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                          <span>{printState.errorMessage}</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setPrintState({ status: 'idle' })}
+                          className="text-[11px] underline text-rose-200 cursor-pointer shrink-0"
+                        >
+                          Uždaryti
+                        </button>
+                      </div>
+                    )}
                   </div>
 
                   {/* Next / Previous sequential buttons */}
                   <div className="flex items-center justify-between gap-3 pt-2 border-t border-white/10">
                     <button
+                      type="button"
                       onClick={handlePrevItem}
                       disabled={focusedItemIndex <= 0}
                       className="inline-flex items-center gap-1 px-3 py-2 text-xs font-semibold text-slate-300 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer transition-colors"
@@ -648,14 +800,15 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
                     <div className="text-center text-[11px] text-slate-400">
                       {labeledItemIds.has(focusedItem.id) ? (
                         <span className="text-emerald-400 font-semibold flex items-center gap-1 justify-center">
-                          <Check className="w-3.5 h-3.5" /> Užklijuota! Galite eiti prie kito.
+                          <Check className="w-3.5 h-3.5" /> Patvirtinta: užklijuota
                         </span>
                       ) : (
-                        <span>Laukia atspausdinimo ir užklijavimo</span>
+                        <span>Dar nepatvirtinta kaip užklijuota</span>
                       )}
                     </div>
 
                     <button
+                      type="button"
                       onClick={handleNextItem}
                       disabled={focusedItemIndex >= activeItems.length - 1}
                       className="inline-flex items-center gap-1 px-4 py-2 text-xs font-bold text-white bg-blue-600/60 hover:bg-blue-600 rounded-lg disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer transition-colors shadow-sm"
@@ -673,48 +826,50 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
             </div>
           )}
 
-          {/* Sequential List of Items in the Room / Filter */}
+          {/* Sequential List of Items */}
           <div className="bg-white border border-slate-300 rounded-xl overflow-hidden shadow-xs">
             <div className="px-5 py-3 border-b border-slate-200 flex items-center justify-between bg-slate-100/80">
-              <div className="flex items-center gap-2">
-                <span className="font-bold text-xs text-slate-900">
-                  Kabineto inventoriaus sąrašas spausdinimui po vieną ({activeItems.length} vnt.)
-                </span>
-              </div>
+              <span className="font-bold text-xs text-slate-900">
+                Inventoriaus sąrašas spausdinimui po vieną ({activeItems.length} vnt.)
+              </span>
               <span className="text-[11px] text-slate-600 font-medium">
-                Paspauskite ant bet kurio daikto arba tiesiai ant spausdintuvo mygtuko eilutėje
+                Varnele žymimi tik patvirtinti užklijuoti daiktai
               </span>
             </div>
 
             <div className="divide-y divide-slate-100 max-h-[420px] overflow-y-auto">
-              {activeItems.map((item, idx) => {
+              {activeItems.map((item) => {
                 const isSelected = focusedItem?.id === item.id;
                 const isLabeled = labeledItemIds.has(item.id);
-                const room = rooms.find(r => r.id === item.roomId);
+                const room = rooms.find((r) => r.id === item.roomId);
 
                 return (
                   <div
                     key={item.id}
-                    onClick={() => setFocusedItemId(item.id)}
+                    onClick={() => {
+                      setFocusedItemId(item.id);
+                      setPrintState({ status: 'idle' });
+                    }}
                     className={`p-3.5 flex items-center justify-between gap-4 transition-colors cursor-pointer ${
-                      isSelected 
-                        ? 'bg-blue-50/80 ring-1 ring-blue-300' 
-                        : 'hover:bg-slate-50'
+                      isSelected ? 'bg-blue-50/80 ring-1 ring-blue-300' : 'hover:bg-slate-50'
                     }`}
                   >
                     <div className="flex items-center gap-3 min-w-0">
-                      {/* Checkbox indicator */}
                       <button
+                        type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          setLabeledItemIds(prev => {
-                            const next = new Set(prev);
-                            if (next.has(item.id)) next.delete(item.id);
-                            else next.add(item.id);
-                            return next;
-                          });
+                          setLabeledItemIds((prev) =>
+                            prev.has(item.id)
+                              ? unmarkLabelApplied(prev, item.id)
+                              : confirmLabelApplied(prev, item.id)
+                          );
                         }}
-                        title={isLabeled ? 'Pažymėta kaip užklijuota' : 'Pažymėti kaip užklijuotą'}
+                        title={
+                          isLabeled
+                            ? 'Pažymėta kaip užklijuota (spustelėkite nuimti)'
+                            : 'Ranka pažymėti kaip užklijuotą'
+                        }
                         className="cursor-pointer"
                       >
                         {isLabeled ? (
@@ -726,7 +881,6 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
                         )}
                       </button>
 
-                      {/* Number and Name */}
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="font-mono text-xs font-bold text-slate-900">
@@ -741,14 +895,15 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
                           {item.serialNumber && (
                             <>
                               <span>·</span>
-                              <span className="font-mono text-slate-400">SN: {item.serialNumber}</span>
+                              <span className="font-mono text-slate-400">
+                                SN: {item.serialNumber}
+                              </span>
                             </>
                           )}
                         </div>
                       </div>
                     </div>
 
-                    {/* Right Action: 1-click Print to Brother */}
                     <div className="flex items-center gap-2 shrink-0">
                       {isLabeled && (
                         <span className="hidden sm:inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
@@ -757,20 +912,21 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
                       )}
 
                       <button
+                        type="button"
                         onClick={(e) => {
                           e.stopPropagation();
                           setFocusedItemId(item.id);
-                          handlePrintSingle(item);
+                          void handlePrintSingle(item);
                         }}
                         disabled={isPrinting}
-                        title={`Spausdinti 36 mm etiketę į Brother (${item.inventoryNumber})`}
+                        title={`Atidaryti spausdinimo dialogą (${item.inventoryNumber})`}
                         className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer shadow-2xs ${
                           isSelected
                             ? 'bg-blue-600 hover:bg-blue-700 text-white'
                             : 'bg-white hover:bg-slate-100 text-slate-700 border border-slate-300'
                         }`}
                       >
-                        <Printer className="w-3.5 h-3.5 text-blue-500" />
+                        <Printer className="w-3.5 h-3.5" />
                         <span>Spausdinti</span>
                       </button>
                     </div>
@@ -782,42 +938,73 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
         </div>
       )}
 
-      {/* VIEW MODE 2: BATCH EXPORT (WORD / EXCEL) */}
+      {/* VIEW MODE 2: BATCH EXPORT (REAL OOXML DOCX / CSV) */}
       {viewMode === 'batch_export' && (
         <div className="space-y-4">
           <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4 shadow-2xs">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <h3 className="text-base font-semibold text-slate-900">
-                  Etikečių sąrašo eksportas dokumentams
+                  Etikečių rinkinio eksportas dokumentams ({listToExport.length} vnt.)
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Jei pageidaujate turėti suformuotą Word ar Excel failą archyvui ar spausdinimui per kompiuterį
+                  Sugeneruojamas tikras Microsoft Word (.docx) su QR/1D PNG kodais arba UTF-8 CSV sąrašas archyvui.
                 </p>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
+                  type="button"
+                  disabled={listToExport.length === 0}
                   onClick={handleDownloadExcelLabels}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors cursor-pointer shadow-2xs"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-45 disabled:cursor-not-allowed transition-colors cursor-pointer shadow-2xs"
                 >
                   <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-                  <span>Atsisiųsti Excel sąrašą</span>
+                  <span>Atsisiųsti CSV sąrašą</span>
                 </button>
                 <button
-                  onClick={handleDownloadWordLabels}
-                  className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors cursor-pointer shadow-sm"
+                  type="button"
+                  disabled={listToExport.length === 0 || isExportingDocx}
+                  onClick={() => void handleDownloadWordLabels()}
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-45 disabled:cursor-not-allowed rounded-lg transition-colors cursor-pointer shadow-sm"
                 >
                   <FileText className="w-4 h-4" />
-                  <span>Atsisiųsti Word (DOCX) etiketes</span>
+                  <span>
+                    {isExportingDocx
+                      ? 'Generuojamas DOCX...'
+                      : 'Atsisiųsti Word (DOCX) etiketes'}
+                  </span>
                 </button>
               </div>
             </div>
 
+            {exportError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-800">
+                {exportError}
+              </div>
+            )}
+
             {/* Batch Options */}
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-3 border-t border-slate-100 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 pt-3 border-t border-slate-100 text-xs">
               <div>
-                <label className="block text-[11px] font-medium text-slate-600 mb-1">Juostos plotis</label>
+                <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                  Kodo tipas
+                </label>
+                <select
+                  value={codeType}
+                  onChange={(e) => setCodeType(e.target.value as CodeType)}
+                  className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 font-medium"
+                >
+                  <option value="qr_code">{CODE_TYPE_LABELS.qr_code}</option>
+                  <option value="barcode_1d">{CODE_TYPE_LABELS.barcode_1d}</option>
+                  <option value="both">{CODE_TYPE_LABELS.both}</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                  Juostos plotis
+                </label>
                 <select
                   value={tapeWidth}
                   onChange={(e) => setTapeWidth(Number(e.target.value) as TapeWidth)}
@@ -830,7 +1017,9 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
               </div>
 
               <div>
-                <label className="block text-[11px] font-medium text-slate-600 mb-1">Etiketės ilgis</label>
+                <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                  Etiketės ilgis
+                </label>
                 <select
                   value={labelLength}
                   onChange={(e) => setLabelLength(Number(e.target.value) as LabelLength)}
@@ -843,33 +1032,104 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
               </div>
 
               <div>
-                <label className="block text-[11px] font-medium text-slate-600 mb-1">Skyrius</label>
+                <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                  Skyrius
+                </label>
                 <select
                   value={selectedDeptId}
-                  onChange={(e) => setSelectedDeptId(e.target.value)}
+                  onChange={(e) => {
+                    setSelectedDeptId(e.target.value);
+                    setSelectedRoomId('all');
+                  }}
                   className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5"
                 >
                   <option value="all">Visi skyriai</option>
-                  {departments.map(d => (
-                    <option key={d.id} value={d.id}>{d.name}</option>
+                  {departments.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name}
+                    </option>
                   ))}
                 </select>
               </div>
 
               <div>
-                <label className="block text-[11px] font-medium text-slate-600 mb-1">Kabinetas</label>
+                <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                  Kabinetas
+                </label>
                 <select
                   value={selectedRoomId}
                   onChange={(e) => setSelectedRoomId(e.target.value)}
                   className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5"
                 >
                   <option value="all">Visi kabinetai</option>
-                  {rooms.map(r => (
-                    <option key={r.id} value={r.id}>{formatRoomName(r)}</option>
-                  ))}
+                  {rooms
+                    .filter((r) => selectedDeptId === 'all' || r.departmentId === selectedDeptId)
+                    .map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {formatRoomName(r)}
+                      </option>
+                    ))}
                 </select>
               </div>
             </div>
+
+            {activeItems.length === 0 ? (
+              <div className="p-6 text-center text-xs text-slate-500 bg-slate-50 rounded-lg border border-slate-200">
+                Eksportui pagal pasirinktus filtrus aktyvių daiktų nėra.
+              </div>
+            ) : (
+              <div className="pt-2 border-t border-slate-100 space-y-2 text-xs">
+                <div className="flex items-center justify-between text-[11px] text-slate-600">
+                  <span>
+                    Pasirinkite konkrečius daiktus (arba palikite nepažymėta, kad eksportuotų visus {activeItems.length} vnt.):
+                  </span>
+                  {selectedBatchIds.size > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedBatchIds(new Set())}
+                      className="text-blue-600 hover:underline font-semibold cursor-pointer"
+                    >
+                      Išvalyti pasirinkimą ({selectedBatchIds.size})
+                    </button>
+                  )}
+                </div>
+                <div className="max-h-60 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-lg">
+                  {activeItems.map((item) => {
+                    const checked = selectedBatchIds.has(item.id);
+                    const room = rooms.find((r) => r.id === item.roomId);
+                    return (
+                      <label
+                        key={item.id}
+                        className="flex items-center justify-between px-3 py-2 hover:bg-slate-50 cursor-pointer gap-2"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => {
+                              setSelectedBatchIds((prev) => {
+                                const next = new Set(prev);
+                                if (e.target.checked) next.add(item.id);
+                                else next.delete(item.id);
+                                return next;
+                              });
+                            }}
+                            className="rounded text-blue-600"
+                          />
+                          <span className="font-mono font-bold text-slate-900">
+                            {item.inventoryNumber}
+                          </span>
+                          <span className="text-slate-700 truncate">{item.name}</span>
+                        </div>
+                        <span className="text-[11px] text-slate-500 shrink-0">
+                          {formatRoomName(room)}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
