@@ -1,7 +1,11 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import jsQR from 'jsqr';
 import { Camera, CameraOff, RefreshCw, AlertTriangle, SwitchCamera, X } from 'lucide-react';
-import { getAuditCameraErrorMessage } from '../utils/auditUtils';
+import {
+  CameraControllerState,
+  CameraVideoElementLike,
+  createAuditCameraController,
+} from '../utils/cameraController';
 
 interface AuditCameraScannerProps {
   isOpen: boolean;
@@ -18,8 +22,13 @@ interface NativeBarcodeDetectorCtor {
   new (options?: { formats?: string[] }): NativeBarcodeDetector;
 }
 
-const DUPLICATE_COOLDOWN_MS = 2500;
-const SCAN_INTERVAL_MS = 120;
+const INITIAL_CAMERA_STATE: CameraControllerState = {
+  status: 'idle',
+  errorMessage: null,
+  devices: [],
+  activeDeviceId: '',
+  lastHighlightCode: null,
+};
 
 export const AuditCameraScanner: React.FC<AuditCameraScannerProps> = ({
   isOpen,
@@ -29,19 +38,12 @@ export const AuditCameraScanner: React.FC<AuditCameraScannerProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const rafIdRef = useRef<number | null>(null);
-  const lastFrameScanAtRef = useRef<number>(0);
-  const lastScannedRef = useRef<{ value: string; timestamp: number } | null>(null);
   const disabledRef = useRef<boolean>(disabled);
   const onDecodedRef = useRef(onDecodedCode);
   const barcodeDetectorRef = useRef<NativeBarcodeDetector | null>(null);
+  const controllerRef = useRef<ReturnType<typeof createAuditCameraController> | null>(null);
 
-  const [status, setStatus] = useState<'idle' | 'starting' | 'active' | 'error'>('idle');
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
-  const [lastHighlightCode, setLastHighlightCode] = useState<string | null>(null);
+  const [cameraState, setCameraState] = useState<CameraControllerState>(INITIAL_CAMERA_STATE);
 
   useEffect(() => {
     disabledRef.current = disabled;
@@ -51,257 +53,103 @@ export const AuditCameraScanner: React.FC<AuditCameraScannerProps> = ({
     onDecodedRef.current = onDecodedCode;
   }, [onDecodedCode]);
 
-  const stopCameraResources = useCallback(() => {
-    if (rafIdRef.current !== null) {
-      cancelAnimationFrame(rafIdRef.current);
-      rafIdRef.current = null;
-    }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => {
-        try {
-          track.stop();
-        } catch {
-          // ignore cleanup failure
-        }
-      });
-      streamRef.current = null;
-    }
-    if (videoRef.current) {
-      try {
-        videoRef.current.pause();
-      } catch {
-        // ignore
-      }
-      videoRef.current.srcObject = null;
-    }
-  }, []);
-
-  const startCamera = useCallback(
-    async (preferredDeviceId?: string) => {
-      stopCameraResources();
-
-      if (
-        typeof navigator === 'undefined' ||
-        !navigator.mediaDevices ||
-        typeof navigator.mediaDevices.getUserMedia !== 'function'
-      ) {
-        setStatus('error');
-        setErrorMessage(
-          typeof window !== 'undefined' && !window.isSecureContext
-            ? 'Kamera naršyklėje veikia tik per saugų HTTPS ryšį arba localhost adresą. Naudokite rankinį įvedimą arba USB skaitytuvą.'
-            : 'Ši naršyklė arba įrenginys nepalaiko kameros prieigos. Naudokite rankinį kodo įvedimą arba USB skaitytuvą.'
-        );
-        return;
-      }
-
-      setStatus('starting');
-      setErrorMessage(null);
-
-      let cancelled = false;
-      try {
-        const videoConstraint: MediaTrackConstraints = preferredDeviceId
-          ? {
-              deviceId: { exact: preferredDeviceId },
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-            }
-          : {
-              facingMode: { ideal: 'environment' },
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-            };
-
-        let stream: MediaStream;
-        try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: videoConstraint,
-            audio: false,
-          });
-        } catch (firstErr) {
-          // Jei tikslios galinės kameros ar raiškos nepavyko parinkti, bandome paprastesnį constraint
-          if (!preferredDeviceId) {
-            stream = await navigator.mediaDevices.getUserMedia({
-              video: true,
-              audio: false,
-            });
-          } else {
-            throw firstErr;
-          }
-        }
-
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
-
-        streamRef.current = stream;
-
-        const videoEl = videoRef.current;
-        if (videoEl) {
-          videoEl.srcObject = stream;
-          videoEl.setAttribute('playsinline', 'true');
-          await videoEl.play().catch(() => {
-            // Kai kurios mobilios naršyklės paleidžia po metadata
-          });
-        }
-
-        // Po leidimo suteikimo nuskaitome kamerų sąrašą (pvz., priekinė / galinė)
-        if (typeof navigator.mediaDevices.enumerateDevices === 'function') {
-          try {
-            const allDevices = await navigator.mediaDevices.enumerateDevices();
-            const videoInputs = allDevices.filter((d) => d.kind === 'videoinput');
-            setDevices(videoInputs);
-
-            const activeTrack = stream.getVideoTracks()[0];
-            const activeId = activeTrack?.getSettings?.().deviceId;
-            if (activeId) {
-              setSelectedDeviceId(activeId);
-            } else if (!preferredDeviceId && videoInputs.length > 0) {
-              const rear = videoInputs.find((d) =>
-                /back|rear|environment|galin/i.test(d.label)
-              );
-              setSelectedDeviceId((rear || videoInputs[0]).deviceId);
-            }
-          } catch {
-            // Device enumeration optional
-          }
-        }
-
-        // Pasirenkame BarcodeDetector jei naršyklė palaiko (naudinga ir 1D brūkšniniams kodams)
-        if (!barcodeDetectorRef.current && typeof window !== 'undefined') {
-          const w = window as unknown as { BarcodeDetector?: NativeBarcodeDetectorCtor };
-          if (typeof w.BarcodeDetector === 'function') {
-            try {
-              barcodeDetectorRef.current = new w.BarcodeDetector({
-                formats: ['qr_code', 'code_128', 'code_39', 'ean_13', 'ean_8'],
-              });
-            } catch {
-              barcodeDetectorRef.current = null;
-            }
-          }
-        }
-
-        setStatus('active');
-
-        const scanLoop = async (timestamp: number) => {
-          if (!streamRef.current) return;
-
-          if (timestamp - lastFrameScanAtRef.current >= SCAN_INTERVAL_MS) {
-            lastFrameScanAtRef.current = timestamp;
-            const video = videoRef.current;
+  const getOrCreateController = () => {
+    if (!controllerRef.current) {
+      controllerRef.current = createAuditCameraController({
+        env: {
+          isSecureContext: () =>
+            typeof window === 'undefined' ? true : Boolean(window.isSecureContext),
+          getUserMedia:
+            typeof navigator !== 'undefined' &&
+            navigator.mediaDevices &&
+            typeof navigator.mediaDevices.getUserMedia === 'function'
+              ? (constraints) => navigator.mediaDevices.getUserMedia(constraints)
+              : undefined,
+          enumerateDevices:
+            typeof navigator !== 'undefined' &&
+            navigator.mediaDevices &&
+            typeof navigator.mediaDevices.enumerateDevices === 'function'
+              ? () => navigator.mediaDevices.enumerateDevices()
+              : undefined,
+          requestFrame: (cb) => requestAnimationFrame(cb),
+          cancelFrame: (id) => cancelAnimationFrame(id),
+          now: () => Date.now(),
+          getVideoElement: () => videoRef.current as unknown as CameraVideoElementLike | null,
+          decodeFrame: async (video) => {
             const canvas = canvasRef.current;
+            const htmlVideo = video as unknown as HTMLVideoElement;
+            if (!canvas || !htmlVideo) return null;
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            if (!ctx) return null;
 
-            if (
-              video &&
-              canvas &&
-              video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
-              video.videoWidth > 0 &&
-              video.videoHeight > 0 &&
-              !disabledRef.current
-            ) {
-              const ctx = canvas.getContext('2d', { willReadFrequently: true });
-              if (ctx) {
-                if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-                  canvas.width = video.videoWidth;
-                  canvas.height = video.videoHeight;
-                }
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            if (canvas.width !== htmlVideo.videoWidth || canvas.height !== htmlVideo.videoHeight) {
+              canvas.width = htmlVideo.videoWidth;
+              canvas.height = htmlVideo.videoHeight;
+            }
+            ctx.drawImage(htmlVideo, 0, 0, canvas.width, canvas.height);
 
-                let decodedValue: string | null = null;
-                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                const qr = jsQR(imageData.data, imageData.width, imageData.height, {
-                  inversionAttempts: 'attemptBoth',
-                });
-                if (qr?.data?.trim()) {
-                  decodedValue = qr.data.trim();
-                } else if (barcodeDetectorRef.current) {
-                  try {
-                    const detected = await barcodeDetectorRef.current.detect(canvas);
-                    const first = detected.find((d) => Boolean(d.rawValue?.trim()));
-                    if (first?.rawValue) {
-                      decodedValue = first.rawValue.trim();
-                    }
-                  } catch {
-                    // ignore detector errors
-                  }
-                }
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const qr = jsQR(imageData.data, imageData.width, imageData.height, {
+              inversionAttempts: 'attemptBoth',
+            });
+            if (qr?.data?.trim()) {
+              return qr.data.trim();
+            }
 
-                if (decodedValue && !disabledRef.current) {
-                  const now = Date.now();
-                  const prev = lastScannedRef.current;
-                  const normalizedKey = decodedValue.trim().toUpperCase();
-                  const isDuplicate =
-                    prev &&
-                    prev.value === normalizedKey &&
-                    now - prev.timestamp < DUPLICATE_COOLDOWN_MS;
-
-                  if (!isDuplicate) {
-                    lastScannedRef.current = { value: normalizedKey, timestamp: now };
-                    setLastHighlightCode(decodedValue);
-                    onDecodedRef.current(decodedValue);
-                  }
+            if (!barcodeDetectorRef.current && typeof window !== 'undefined') {
+              const w = window as unknown as { BarcodeDetector?: NativeBarcodeDetectorCtor };
+              if (typeof w.BarcodeDetector === 'function') {
+                try {
+                  barcodeDetectorRef.current = new w.BarcodeDetector({
+                    formats: ['qr_code', 'code_128', 'code_39', 'ean_13', 'ean_8'],
+                  });
+                } catch {
+                  barcodeDetectorRef.current = null;
                 }
               }
             }
-          }
 
-          if (streamRef.current) {
-            rafIdRef.current = requestAnimationFrame((ts) => {
-              void scanLoop(ts);
-            });
-          }
-        };
-
-        rafIdRef.current = requestAnimationFrame((ts) => {
-          void scanLoop(ts);
-        });
-      } catch (err) {
-        if (!cancelled) {
-          stopCameraResources();
-          setStatus('error');
-          setErrorMessage(getAuditCameraErrorMessage(err));
-        }
-      }
-
-      return () => {
-        cancelled = true;
-      };
-    },
-    [stopCameraResources]
-  );
+            if (barcodeDetectorRef.current) {
+              try {
+                const detected = await barcodeDetectorRef.current.detect(canvas);
+                const first = detected.find((d) => Boolean(d.rawValue?.trim()));
+                if (first?.rawValue) {
+                  return first.rawValue.trim();
+                }
+              } catch {
+                // ignore detector failure
+              }
+            }
+            return null;
+          },
+        },
+        isDecodingDisabled: () => disabledRef.current,
+        onStateChange: (nextState) => setCameraState(nextState),
+        onDecodedCode: (raw) => onDecodedRef.current(raw),
+      });
+    }
+    return controllerRef.current;
+  };
 
   useEffect(() => {
+    const controller = getOrCreateController();
     if (!isOpen) {
-      stopCameraResources();
-      setStatus('idle');
-      setErrorMessage(null);
-      setLastHighlightCode(null);
+      controller.stop();
       return;
     }
 
-    let disposed = false;
-    void startCamera(selectedDeviceId || undefined).then(() => {
-      if (disposed) {
-        stopCameraResources();
-      }
-    });
+    void controller.start();
 
     return () => {
-      disposed = true;
-      stopCameraResources();
+      controller.stop();
     };
-    // Paleidžiame tik pasikeitus isOpen arba vartotojui perjungus kamerą
+    // Paleidžiame tik pasikeitus isOpen; kameros perjungimas vykdomas tiesioginiu vartotojo paspaudimu
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, selectedDeviceId]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const handleSwitchCamera = () => {
-    if (devices.length < 2) return;
-    const currentIndex = devices.findIndex((d) => d.deviceId === selectedDeviceId);
-    const nextIndex = (currentIndex + 1) % devices.length;
-    setSelectedDeviceId(devices[nextIndex].deviceId);
-  };
+  const { status, errorMessage, devices, lastHighlightCode, activeDeviceId } = cameraState;
 
   return (
     <div className="bg-slate-900 rounded-xl overflow-hidden border border-slate-700 shadow-lg text-white">
@@ -319,7 +167,7 @@ export const AuditCameraScanner: React.FC<AuditCameraScannerProps> = ({
           {devices.length > 1 && (
             <button
               type="button"
-              onClick={handleSwitchCamera}
+              onClick={() => void getOrCreateController().switchCamera()}
               className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-[11px] font-semibold cursor-pointer"
               title="Perjungti kamerą (priekinė / galinė)"
             >
@@ -330,7 +178,7 @@ export const AuditCameraScanner: React.FC<AuditCameraScannerProps> = ({
           <button
             type="button"
             onClick={() => {
-              stopCameraResources();
+              getOrCreateController().stop();
               onClose();
             }}
             className="inline-flex items-center gap-1 px-2 py-1 rounded bg-rose-600/80 hover:bg-rose-600 text-[11px] font-bold cursor-pointer"
@@ -385,7 +233,7 @@ export const AuditCameraScanner: React.FC<AuditCameraScannerProps> = ({
             <div className="flex items-center justify-center gap-2">
               <button
                 type="button"
-                onClick={() => void startCamera(selectedDeviceId || undefined)}
+                onClick={() => void getOrCreateController().start(activeDeviceId || undefined)}
                 className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-xs font-bold cursor-pointer"
               >
                 Bandyti dar kartą
@@ -393,7 +241,7 @@ export const AuditCameraScanner: React.FC<AuditCameraScannerProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  stopCameraResources();
+                  getOrCreateController().stop();
                   onClose();
                 }}
                 className="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-xs font-semibold cursor-pointer"

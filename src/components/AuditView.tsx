@@ -36,6 +36,7 @@ import {
   buildAuditSnapshotItems,
   computeAuditStats,
   EffectiveAuditRow,
+  evaluateItemAuditScope,
   getEffectiveSessionRows,
 } from '../utils/auditUtils';
 
@@ -83,6 +84,7 @@ interface AuditViewProps {
     actualRoomId: string;
     method: AuditCheckMethod;
     notes?: string;
+    confirmExcludedStatus?: boolean;
   }) => Promise<AuditActionResult>;
   onMarkAuditItemMissing: (payload: {
     sessionId: string;
@@ -97,7 +99,8 @@ interface AuditViewProps {
   onRelocateItem: (
     itemId: string,
     newRoomId: string,
-    sessionId?: string
+    sessionId?: string,
+    confirmExcludedStatus?: boolean
   ) => Promise<AuditActionResult>;
 }
 
@@ -153,9 +156,11 @@ export const AuditView: React.FC<AuditViewProps> = ({
   const scanInFlightRef = useRef(false);
 
   const [scanFeedback, setScanFeedback] = useState<{
-    type: 'success' | 'relocated' | 'not_found' | 'already_scanned' | 'error';
+    type: 'success' | 'relocated' | 'excluded_status' | 'not_found' | 'already_scanned' | 'error';
     message: string;
     item?: InventoryItem;
+    detectedMethod?: AuditCheckMethod;
+    isAdditionalFinding?: boolean;
     alreadyCheckedRoomName?: string;
     canUpdateLocation?: boolean;
   } | null>(null);
@@ -251,18 +256,32 @@ export const AuditView: React.FC<AuditViewProps> = ({
     );
   }, [allSessionRows, selectedDeptId]);
 
+  const scopedDeptRows = useMemo(
+    () => deptFilteredRows.filter((r) => !r.isOutsideOriginalScope && !r.isAdditionalFinding),
+    [deptFilteredRows]
+  );
+
+  const additionalDeptRows = useMemo(
+    () => deptFilteredRows.filter((r) => r.isOutsideOriginalScope || r.isAdditionalFinding),
+    [deptFilteredRows]
+  );
+
   const overallStats = useMemo(() => computeAuditStats(allSessionRows), [allSessionRows]);
 
-  // Kabineto tikėtinos ir faktiškai kitur rastos eilutės
+  // Kabineto tikėtinos pradinės apimties eilutės ir čia rasti papildomi / perkelti objektai
   const expectedInRoomRows = useMemo(() => {
     if (!activeRoom) return [];
-    return allSessionRows.filter((r) => r.expectedRoomId === activeRoom.id);
+    return allSessionRows.filter(
+      (r) => !r.isOutsideOriginalScope && !r.isAdditionalFinding && r.expectedRoomId === activeRoom.id
+    );
   }, [allSessionRows, activeRoom]);
 
   const foundElsewhereInActiveRoomRows = useMemo(() => {
     if (!activeRoom) return [];
     return allSessionRows.filter(
-      (r) => r.expectedRoomId !== activeRoom.id && r.checkRecord?.actualRoomId === activeRoom.id
+      (r) =>
+        r.checkRecord?.actualRoomId === activeRoom.id &&
+        (r.expectedRoomId !== activeRoom.id || r.isAdditionalFinding || r.isOutsideOriginalScope)
     );
   }, [allSessionRows, activeRoom]);
 
@@ -324,36 +343,40 @@ export const AuditView: React.FC<AuditViewProps> = ({
     }
 
     const found = resolution.item;
+    const detectedMethod: AuditCheckMethod =
+      source === 'camera' || resolution.format === 'json_qr'
+        ? 'qr'
+        : resolution.matchedBy === 'barcode'
+        ? 'barcode'
+        : 'manual_code';
 
-    // Nurašyto turto apsauga
-    if (found.status === 'written_off') {
-      setScanFeedback({
-        type: 'error',
-        message: `Turtas [${found.inventoryNumber}] „${found.name}“ yra nurašytas ir neįtraukiamas į aktyvaus turto inventorizaciją.`,
-        item: found,
-      });
+    // Nuosekli apimties ir statuso patikra (identiška serverio taisyklėms)
+    const scopeCheck = evaluateItemAuditScope(selectedSession, found, activeRoom, {
+      action: 'check',
+    });
+
+    if (!scopeCheck.allowed) {
+      if (scopeCheck.code === 'EXCLUDED_BY_STATUS') {
+        setScanFeedback({
+          type: 'excluded_status',
+          message: `${scopeCheck.message} Jei vis tiek norite užfiksuoti jį kaip išimtį (papildomą radinį), turite aiškiai tai patvirtinti.`,
+          item: found,
+          detectedMethod,
+        });
+      } else {
+        setScanFeedback({
+          type: 'error',
+          message: scopeCheck.message,
+          item: found,
+        });
+      }
       if (source === 'manual') setInputCode('');
       return;
     }
 
-    // Sesijos skyriaus apimties patikra
     const snapRow = allSessionRows.find((r) => r.itemId === found.id);
     const expectedDeptId = snapRow?.expectedDepartmentId || found.departmentId;
     const expectedRoomId = snapRow?.expectedRoomId || found.roomId;
-
-    if (
-      selectedSession.departmentId &&
-      expectedDeptId !== selectedSession.departmentId &&
-      activeRoom.departmentId !== selectedSession.departmentId
-    ) {
-      setScanFeedback({
-        type: 'error',
-        message: `Turtas [${found.inventoryNumber}] priklauso kitam skyriui ir nepatenka į šios inventorizacijos sesijos apimtį.`,
-        item: found,
-      });
-      if (source === 'manual') setInputCode('');
-      return;
-    }
 
     // Ar jau patikrintas šioje sesijoje?
     const existingCheck = selectedSession.checkRecords?.[found.id];
@@ -382,13 +405,6 @@ export const AuditView: React.FC<AuditViewProps> = ({
       if (source === 'manual') setInputCode('');
       return;
     }
-
-    const detectedMethod: AuditCheckMethod =
-      source === 'camera' || resolution.format === 'json_qr'
-        ? 'qr'
-        : resolution.matchedBy === 'barcode'
-        ? 'barcode'
-        : 'manual_code';
 
     // Tikėtina vieta sutampa su aktyviu kabinetu -> fiksuojame iš karto atomine mutacija
     if (expectedRoomId === activeRoom.id) {
@@ -422,18 +438,24 @@ export const AuditView: React.FC<AuditViewProps> = ({
       return;
     }
 
-    // Rastas KITAME kabinete! Automatiškai registro vietos nekeičiame – suteikiame du aiškius pasirinkimus
+    // Rastas KITAME kabinete arba kaip papildomas kito skyriaus radinys!
     const expectedRoom = rooms.find((r) => r.id === expectedRoomId);
     const expectedDept = departments.find((d) => d.id === expectedDeptId);
     setScanFeedback({
       type: 'relocated',
-      message: `Turtas [${found.inventoryNumber}] „${found.name}“ pagal dokumentus priklauso ${
+      message: `${
+        scopeCheck.isAdditionalFinding
+          ? 'Papildomas radinys (nebuvo šios sesijos pradiniame sąraše): '
+          : ''
+      }Turtas [${found.inventoryNumber}] „${found.name}“ pagal dokumentus priklauso ${
         expectedDept?.code ? `[${expectedDept.code}] ` : ''
       }${snapRow?.expectedRoomName || formatRoomName(expectedRoom, true)}, bet rastas čia (${formatRoomName(
         activeRoom,
         true
       )}). Pasirinkite veiksmą:`,
       item: found,
+      detectedMethod,
+      isAdditionalFinding: scopeCheck.isAdditionalFinding,
     });
     if (source === 'manual') setInputCode('');
   };
@@ -443,7 +465,11 @@ export const AuditView: React.FC<AuditViewProps> = ({
     void processScannedCode(inputCode, 'manual');
   };
 
-  const handleRecordFoundElsewhereOnly = async (item: InventoryItem) => {
+  const handleRecordFoundElsewhereOnly = async (
+    item: InventoryItem,
+    confirmExcludedStatus = false,
+    methodOverride?: AuditCheckMethod
+  ) => {
     if (!selectedSession || isCompleted || !activeRoom || scanInFlightRef.current) return;
     scanInFlightRef.current = true;
     setIsScanBusy(true);
@@ -452,15 +478,21 @@ export const AuditView: React.FC<AuditViewProps> = ({
         sessionId: selectedSession.id,
         itemId: item.id,
         actualRoomId: activeRoom.id,
-        method: isCameraOpen ? 'qr' : 'manual_code',
+        method: methodOverride || (isCameraOpen ? 'qr' : 'manual_code'),
+        confirmExcludedStatus,
       });
       if (res.ok) {
         setScanFeedback({
           type: 'success',
-          message: `Užfiksuota faktinė vieta (${formatRoomName(
-            activeRoom,
-            true
-          )}). Oficiali turto vieta registre liko nepakeista.`,
+          message: confirmExcludedStatus
+            ? `Išimties tvarka užfiksuotas papildomas radinys patalpoje ${formatRoomName(
+                activeRoom,
+                true
+              )}. Oficiali turto vieta registre liko nepakeista.`
+            : `Užfiksuota faktinė vieta (${formatRoomName(
+                activeRoom,
+                true
+              )}). Oficiali turto vieta registre liko nepakeista.`,
           item,
         });
       } else {
@@ -476,12 +508,20 @@ export const AuditView: React.FC<AuditViewProps> = ({
     }
   };
 
-  const handleConfirmOfficialRelocation = async (item: InventoryItem) => {
+  const handleConfirmOfficialRelocation = async (
+    item: InventoryItem,
+    confirmExcludedStatus = false
+  ) => {
     if (!selectedSession || isCompleted || !activeRoom || scanInFlightRef.current) return;
     scanInFlightRef.current = true;
     setIsScanBusy(true);
     try {
-      const res = await onRelocateItem(item.id, activeRoom.id, selectedSession.id);
+      const res = await onRelocateItem(
+        item.id,
+        activeRoom.id,
+        selectedSession.id,
+        confirmExcludedStatus
+      );
       if (res.ok) {
         setScanFeedback({
           type: 'success',
@@ -1361,7 +1401,12 @@ export const AuditView: React.FC<AuditViewProps> = ({
               >
                 {availableRooms.map((r) => {
                   const dept = departments.find((d) => d.id === r.departmentId);
-                  const rRows = allSessionRows.filter((row) => row.expectedRoomId === r.id);
+                  const rRows = allSessionRows.filter(
+                    (row) =>
+                      !row.isOutsideOriginalScope &&
+                      !row.isAdditionalFinding &&
+                      row.expectedRoomId === r.id
+                  );
                   const rStats = computeAuditStats(rRows);
                   return (
                     <option key={r.id} value={r.id}>
@@ -1472,7 +1517,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
                 className={`p-4 rounded-lg border text-xs space-y-3 ${
                   scanFeedback.type === 'success'
                     ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
-                    : scanFeedback.type === 'relocated'
+                    : scanFeedback.type === 'relocated' || scanFeedback.type === 'excluded_status'
                     ? 'bg-amber-50 border-amber-300 text-amber-950'
                     : scanFeedback.type === 'already_scanned'
                     ? 'bg-blue-50 border-blue-300 text-blue-900'
@@ -1484,6 +1529,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
                     <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
                   )}
                   {(scanFeedback.type === 'relocated' ||
+                    scanFeedback.type === 'excluded_status' ||
                     scanFeedback.type === 'already_scanned') && (
                     <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                   )}
@@ -1493,6 +1539,40 @@ export const AuditView: React.FC<AuditViewProps> = ({
                   <span>{scanFeedback.message}</span>
                 </div>
 
+                {scanFeedback.type === 'excluded_status' &&
+                  scanFeedback.item &&
+                  activeRoom &&
+                  !isCompleted && (
+                    <div className="pt-2 border-t border-amber-200 flex flex-col gap-2">
+                      <button
+                        type="button"
+                        disabled={isScanBusy}
+                        onClick={() =>
+                          void handleRecordFoundElsewhereOnly(
+                            scanFeedback.item!,
+                            true,
+                            scanFeedback.detectedMethod
+                          )
+                        }
+                        className="w-full px-3 py-2 bg-white hover:bg-amber-100 text-amber-950 border border-amber-400 rounded-md text-xs font-bold cursor-pointer text-left"
+                      >
+                        Išimtis: užfiksuoti čia kaip papildomą radinį (nekeičiant registro vietos)
+                      </button>
+                      {scanFeedback.item.roomId !== activeRoom.id && (
+                        <button
+                          type="button"
+                          disabled={isScanBusy}
+                          onClick={() =>
+                            void handleConfirmOfficialRelocation(scanFeedback.item!, true)
+                          }
+                          className="w-full px-3 py-2 bg-amber-700 hover:bg-amber-800 text-white rounded-md text-xs font-bold cursor-pointer text-left"
+                        >
+                          Išimtis: oficialiai perkelti į {formatRoomName(activeRoom)} ir užfiksuoti radiniu
+                        </button>
+                      )}
+                    </div>
+                  )}
+
                 {scanFeedback.type === 'relocated' &&
                   scanFeedback.item &&
                   activeRoom &&
@@ -1501,7 +1581,13 @@ export const AuditView: React.FC<AuditViewProps> = ({
                       <button
                         type="button"
                         disabled={isScanBusy}
-                        onClick={() => void handleRecordFoundElsewhereOnly(scanFeedback.item!)}
+                        onClick={() =>
+                          void handleRecordFoundElsewhereOnly(
+                            scanFeedback.item!,
+                            false,
+                            scanFeedback.detectedMethod
+                          )
+                        }
                         className="w-full px-3 py-2 bg-white hover:bg-amber-100 text-amber-950 border border-amber-400 rounded-md text-xs font-bold cursor-pointer text-left"
                       >
                         1. Užfiksuoti faktinę vietą čia (nekeičiant registro vietos)
@@ -1667,13 +1753,13 @@ export const AuditView: React.FC<AuditViewProps> = ({
             </div>
           </div>
 
-          {/* Kito kabineto turtas, faktiškai rastas čia */}
+          {/* Čia faktiškai rastas kito kabineto turtas arba papildomi radiniai */}
           {foundElsewhereInActiveRoomRows.length > 0 && activeRoom && (
             <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-4 space-y-2.5">
               <h4 className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
                 <ArrowRightLeft className="w-4 h-4 text-amber-700" />
                 <span>
-                  Čia ({formatRoomName(activeRoom)}) faktiškai rastas kito kabineto turtas (
+                  Čia ({formatRoomName(activeRoom)}) faktiškai rasti papildomi radiniai / kito kabineto turtas (
                   {foundElsewhereInActiveRoomRows.length})
                 </span>
               </h4>
@@ -1683,31 +1769,55 @@ export const AuditView: React.FC<AuditViewProps> = ({
                     key={row.itemId}
                     className="bg-white border border-amber-200 rounded-lg p-2.5 flex flex-wrap items-center justify-between gap-2 text-xs"
                   >
-                    <div>
-                      <span className="font-mono font-bold text-slate-900 mr-2">
-                        {row.inventoryNumber}
-                      </span>
-                      <span className="font-semibold text-slate-800">{row.name}</span>
+                    <div className="space-y-0.5">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-mono font-bold text-slate-900">
+                          {row.inventoryNumber}
+                        </span>
+                        <span className="font-semibold text-slate-800">{row.name}</span>
+                        {row.isAdditionalFinding && (
+                          <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-800 border border-indigo-200 text-[10px] font-bold">
+                            Papildomas radinys
+                          </span>
+                        )}
+                        {row.excludedStatusException && (
+                          <span className="px-1.5 py-0.5 rounded bg-rose-50 text-rose-800 border border-rose-200 text-[10px] font-bold">
+                            Išimtis (neįtrauktas statusas)
+                          </span>
+                        )}
+                        {row.hasIncompleteHistory && (
+                          <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-300 text-[10px] font-semibold">
+                            Riboti senos sesijos duomenys
+                          </span>
+                        )}
+                      </div>
                       <div className="text-[11px] text-slate-600">
-                        Pagal registrą / pradžią: <strong>{row.expectedRoomName}</strong> ·{' '}
+                        Pagal registrą / pradžią: <strong>{row.expectedDepartmentName} · {row.expectedRoomName}</strong> ·{' '}
                         {row.checkRecord?.officialTransferDone
                           ? 'Oficialiai perkeltas su judėjimo aktu'
                           : 'Užfiksuota tik faktinė vieta'}
                       </div>
                     </div>
-                    {!isCompleted && !row.checkRecord?.officialTransferDone && (
-                      <button
-                        type="button"
-                        disabled={isScanBusy}
-                        onClick={() => {
-                          const regItem = items.find((i) => i.id === row.itemId);
-                          if (regItem) void handleConfirmOfficialRelocation(regItem);
-                        }}
-                        className="px-2.5 py-1 bg-amber-700 hover:bg-amber-800 text-white rounded text-[11px] font-bold cursor-pointer"
-                      >
-                        Oficialiai perkelti čia
-                      </button>
-                    )}
+                    {!isCompleted &&
+                      !row.checkRecord?.officialTransferDone &&
+                      row.expectedRoomId !== activeRoom.id && (
+                        <button
+                          type="button"
+                          disabled={isScanBusy}
+                          onClick={() => {
+                            const regItem = items.find((i) => i.id === row.itemId);
+                            if (regItem) {
+                              void handleConfirmOfficialRelocation(
+                                regItem,
+                                Boolean(row.excludedStatusException)
+                              );
+                            }
+                          }}
+                          className="px-2.5 py-1 bg-amber-700 hover:bg-amber-800 text-white rounded text-[11px] font-bold cursor-pointer"
+                        >
+                          Oficialiai perkelti čia
+                        </button>
+                      )}
                   </div>
                 ))}
               </div>
@@ -1825,7 +1935,7 @@ export const AuditView: React.FC<AuditViewProps> = ({
 
             <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-1.5">
               <div className="flex justify-between">
-                <span className="text-slate-600">Iš viso sesijos sąraše:</span>
+                <span className="text-slate-600">Iš viso pradinės apimties sąraše:</span>
                 <strong className="font-mono text-slate-900">{overallStats.total} vnt.</strong>
               </div>
               <div className="flex justify-between">
@@ -1844,6 +1954,12 @@ export const AuditView: React.FC<AuditViewProps> = ({
                 <span className="text-slate-800">Dar nepatikrinta (taps „Trūksta“):</span>
                 <strong className="font-mono text-rose-700">{overallStats.uncheckedCount} vnt.</strong>
               </div>
+              {overallStats.additionalFindingsCount > 0 && (
+                <div className="flex justify-between pt-1 border-t border-slate-200 text-indigo-800 font-semibold">
+                  <span>Papildomi radiniai (atskirai nuo pradinės apimties):</span>
+                  <strong className="font-mono">{overallStats.additionalFindingsCount} vnt.</strong>
+                </div>
+              )}
             </div>
 
             <div>
@@ -1947,6 +2063,9 @@ export const AuditView: React.FC<AuditViewProps> = ({
                 </div>
               </div>
 
+              <div className="mb-2 font-sans text-xs font-bold text-slate-800 uppercase tracking-wide">
+                1. Pradinės sesijos apimties materialusis turtas ({scopedDeptRows.length} vnt.)
+              </div>
               <table className="w-full border-collapse border border-slate-300 text-[11px] font-sans">
                 <thead>
                   <tr className="bg-slate-100 text-slate-800">
@@ -1954,20 +2073,21 @@ export const AuditView: React.FC<AuditViewProps> = ({
                     <th className="border border-slate-300 p-1.5 text-left w-24">Inv. Nr.</th>
                     <th className="border border-slate-300 p-1.5 text-left">Turto pavadinimas</th>
                     <th className="border border-slate-300 p-1.5 text-left w-32">Tikėtina patalpa</th>
+                    <th className="border border-slate-300 p-1.5 text-left w-28">Atsakingas asmuo</th>
                     <th className="border border-slate-300 p-1.5 text-right w-16">Vertė, €</th>
                     <th className="border border-slate-300 p-1.5 text-center w-28">Rezultatas</th>
                     <th className="border border-slate-300 p-1.5 text-left w-36">Patikra / Pastabos</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {deptFilteredRows.length === 0 ? (
+                  {scopedDeptRows.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="border border-slate-300 p-4 text-center text-slate-500">
-                        Šiame skyriuje / sesijoje nėra įtrauktų turto objektų.
+                      <td colSpan={8} className="border border-slate-300 p-4 text-center text-slate-500">
+                        Šiame skyriuje / sesijoje nėra pradinės apimties turto objektų.
                       </td>
                     </tr>
                   ) : (
-                    deptFilteredRows.map((row, idx) => {
+                    scopedDeptRows.map((row, idx) => {
                       const rec = row.checkRecord;
                       return (
                         <tr key={row.itemId} className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}>
@@ -1982,10 +2102,18 @@ export const AuditView: React.FC<AuditViewProps> = ({
                                 SN: {row.serialNumber}
                               </span>
                             )}
+                            {row.hasIncompleteHistory && (
+                              <span className="text-[10px] text-amber-700 block">
+                                (Senos sesijos įrašas be fiksuoto momentinio sąrašo)
+                              </span>
+                            )}
                           </td>
                           <td className="border border-slate-300 p-1.5 text-slate-700">
                             {row.expectedRoomName}
                             {row.expectedDepartmentCode ? ` (${row.expectedDepartmentCode})` : ''}
+                          </td>
+                          <td className="border border-slate-300 p-1.5 text-slate-700">
+                            {row.responsibleUserName}
                           </td>
                           <td className="border border-slate-300 p-1.5 text-right font-mono tabular-nums">
                             {row.purchasePrice.toFixed(2)}
@@ -2015,25 +2143,110 @@ export const AuditView: React.FC<AuditViewProps> = ({
                 </tbody>
               </table>
 
+              {additionalDeptRows.length > 0 && (
+                <div className="mt-6">
+                  <div className="mb-2 font-sans text-xs font-bold text-indigo-900 uppercase tracking-wide">
+                    2. Papildomi radiniai (nebuvę pradiniame sesijos sąraše, {additionalDeptRows.length} vnt.)
+                  </div>
+                  <table className="w-full border-collapse border border-slate-300 text-[11px] font-sans">
+                    <thead>
+                      <tr className="bg-indigo-50 text-slate-800">
+                        <th className="border border-slate-300 p-1.5 text-center w-8">Nr.</th>
+                        <th className="border border-slate-300 p-1.5 text-left w-24">Inv. Nr.</th>
+                        <th className="border border-slate-300 p-1.5 text-left">Turto pavadinimas</th>
+                        <th className="border border-slate-300 p-1.5 text-left w-32">Priskirta vieta → Rasta</th>
+                        <th className="border border-slate-300 p-1.5 text-left w-28">Atsakingas asmuo</th>
+                        <th className="border border-slate-300 p-1.5 text-right w-16">Vertė, €</th>
+                        <th className="border border-slate-300 p-1.5 text-left w-40">Patikra / Pastabos</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {additionalDeptRows.map((row, idx) => {
+                        const rec = row.checkRecord;
+                        return (
+                          <tr key={row.itemId} className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}>
+                            <td className="border border-slate-300 p-1.5 text-center font-mono">{idx + 1}</td>
+                            <td className="border border-slate-300 p-1.5 font-mono font-semibold">
+                              {row.inventoryNumber}
+                            </td>
+                            <td className="border border-slate-300 p-1.5">
+                              <span className="font-medium">{row.name}</span>
+                              {row.serialNumber && (
+                                <span className="text-[10px] text-slate-500 block font-mono">
+                                  SN: {row.serialNumber}
+                                </span>
+                              )}
+                              {row.excludedStatusException && (
+                                <span className="text-[10px] text-rose-700 block font-semibold">
+                                  Išimtis: statusas buvo neįtrauktas į sesijos apimtį
+                                </span>
+                              )}
+                              {row.hasIncompleteHistory && (
+                                <span className="text-[10px] text-amber-700 block">
+                                  Riboti senos sesijos duomenys (trūksta momentinės informacijos)
+                                </span>
+                              )}
+                            </td>
+                            <td className="border border-slate-300 p-1.5 text-slate-700">
+                              <div>
+                                {row.expectedDepartmentName} ({row.expectedRoomName})
+                              </div>
+                              <div className="font-semibold text-amber-800">
+                                → {rec?.actualRoomName || '—'}
+                              </div>
+                            </td>
+                            <td className="border border-slate-300 p-1.5 text-slate-700">
+                              {row.responsibleUserName}
+                            </td>
+                            <td className="border border-slate-300 p-1.5 text-right font-mono tabular-nums">
+                              {row.purchasePrice.toFixed(2)}
+                            </td>
+                            <td className="border border-slate-300 p-1.5 text-[10px] text-slate-600">
+                              {rec
+                                ? `${rec.checkedByUserName}, ${METHOD_LABELS[rec.method]} (${rec.checkedAt.slice(0, 10)})`
+                                : row.notes || '—'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
               {(() => {
-                const printStats = computeAuditStats(deptFilteredRows);
+                const printStats = computeAuditStats(scopedDeptRows);
+                const hasAnyIncompleteHistory = deptFilteredRows.some((r) => r.hasIncompleteHistory);
                 return (
-                  <div className="mt-4 font-sans text-xs flex flex-wrap justify-between gap-2 border-t pt-2 border-slate-300">
-                    <span>
-                      Viso sąraše: <strong>{printStats.total} vnt.</strong>
-                    </span>
-                    <span>
-                      Rasta vietoje: <strong className="text-emerald-800">{printStats.foundInPlaceCount} vnt.</strong>
-                    </span>
-                    <span>
-                      Rasta kitur: <strong className="text-amber-800">{printStats.foundElsewhereCount} vnt.</strong>
-                    </span>
-                    <span>
-                      Trūksta: <strong className="text-rose-800">{printStats.missingCount} vnt.</strong>
-                    </span>
-                    <span>
-                      Dar nepatikrinta: <strong className="text-slate-700">{printStats.uncheckedCount} vnt.</strong>
-                    </span>
+                  <div className="mt-4 space-y-2 border-t pt-2 border-slate-300 font-sans text-xs">
+                    <div className="flex flex-wrap justify-between gap-2">
+                      <span>
+                        Pradinėje apimtyje: <strong>{printStats.total} vnt.</strong>
+                      </span>
+                      <span>
+                        Rasta vietoje: <strong className="text-emerald-800">{printStats.foundInPlaceCount} vnt.</strong>
+                      </span>
+                      <span>
+                        Rasta kitur: <strong className="text-amber-800">{printStats.foundElsewhereCount} vnt.</strong>
+                      </span>
+                      <span>
+                        Trūksta: <strong className="text-rose-800">{printStats.missingCount} vnt.</strong>
+                      </span>
+                      <span>
+                        Dar nepatikrinta: <strong className="text-slate-700">{printStats.uncheckedCount} vnt.</strong>
+                      </span>
+                      {additionalDeptRows.length > 0 && (
+                        <span>
+                          Papildomi radiniai:{' '}
+                          <strong className="text-indigo-900">{additionalDeptRows.length} vnt.</strong>
+                        </span>
+                      )}
+                    </div>
+                    {hasAnyIncompleteHistory && (
+                      <p className="text-[11px] text-amber-800">
+                        Pastaba: dalyje senesnių sesijų įrašų nėra išsaugotų momentinių duomenų – trūkstama istorija nėra dirbtinai atkuriama.
+                      </p>
+                    )}
                   </div>
                 );
               })()}

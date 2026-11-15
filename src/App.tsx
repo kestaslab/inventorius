@@ -419,6 +419,7 @@ export default function App() {
     actualRoomId: string;
     method: AuditCheckMethod;
     notes?: string;
+    confirmExcludedStatus?: boolean;
   }) => {
     const res = await runMutation({
       type: 'RECORD_AUDIT_CHECK',
@@ -430,6 +431,7 @@ export default function App() {
       checkedByUserName: currentUser?.fullName || 'Komisijos narys',
       checkedAt: new Date().toISOString(),
       ...(payload.notes ? { notes: payload.notes } : {}),
+      ...(payload.confirmExcludedStatus ? { confirmExcludedStatus: true } : {}),
     });
     return { ok: res.ok, error: res.error };
   };
@@ -465,7 +467,12 @@ export default function App() {
   };
 
   // Official Relocate Item during physical audit
-  const handleRelocateItem = async (itemId: string, newRoomId: string, sessionId?: string) => {
+  const handleRelocateItem = async (
+    itemId: string,
+    newRoomId: string,
+    sessionId?: string,
+    confirmExcludedStatus?: boolean
+  ) => {
     if (!rooms.some(r => r.id === newRoomId)) {
       return { ok: false, error: 'Tikslinis kabinetas nerastas.' };
     }
@@ -477,6 +484,7 @@ export default function App() {
       ...(sessionId ? { sessionId } : {}),
       transferredByUserId: currentUser?.id,
       transferredByUserName: currentUser?.fullName || 'Komisijos narys',
+      ...(confirmExcludedStatus ? { confirmExcludedStatus: true } : {}),
     });
     return { ok: res.ok, error: res.error };
   };

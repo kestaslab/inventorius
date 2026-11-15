@@ -1,10 +1,12 @@
 import {
+  AuditCheckItemSnapshot,
   AuditCheckRecord,
   AuditSession,
   AuditSnapshotItem,
   Department,
   InventoryItem,
   ItemCategory,
+  ItemStatus,
   Room,
   User,
   formatRoomName,
@@ -68,6 +70,159 @@ export function buildAuditSnapshotItems(
     });
 }
 
+export function buildAuditCheckItemSnapshot(
+  parts: {
+    departments: Department[];
+    users: User[];
+  },
+  item: InventoryItem,
+  expectedDepartmentId: string,
+  snapMatch?: AuditSnapshotItem
+): AuditCheckItemSnapshot {
+  const dept = parts.departments.find((d) => d.id === expectedDepartmentId);
+  const resp = parts.users.find((u) => u.id === (snapMatch?.responsibleUserId || item.responsibleUserId));
+
+  return {
+    inventoryNumber: snapMatch?.inventoryNumber || item.inventoryNumber,
+    ...((snapMatch?.serialNumber ?? item.serialNumber)
+      ? { serialNumber: snapMatch?.serialNumber ?? item.serialNumber }
+      : {}),
+    name: snapMatch?.name || item.name,
+    category: snapMatch?.category || item.category,
+    expectedDepartmentName: snapMatch?.expectedDepartmentName || dept?.name || 'Nežinomas skyrius',
+    ...((snapMatch?.expectedDepartmentCode ?? dept?.code)
+      ? { expectedDepartmentCode: snapMatch?.expectedDepartmentCode ?? dept?.code }
+      : {}),
+    responsibleUserId: snapMatch?.responsibleUserId || item.responsibleUserId,
+    responsibleUserName:
+      snapMatch?.responsibleUserName || resp?.fullName || 'Nenurodytas atsakingas asmuo',
+    purchasePrice: snapMatch?.purchasePrice ?? (Number(item.purchasePrice) || 0),
+    ...((snapMatch?.residualValue ?? item.residualValue) !== undefined
+      ? { residualValue: snapMatch?.residualValue ?? item.residualValue }
+      : {}),
+    statusAtCheck: item.status,
+  };
+}
+
+export type AuditScopeEvaluationResult =
+  | {
+      allowed: true;
+      isInInitialSnapshot: boolean;
+      isAdditionalFinding: boolean;
+      excludedStatusException: boolean;
+    }
+  | {
+      allowed: false;
+      code: 'WRITTEN_OFF' | 'EXCLUDED_BY_STATUS' | 'OUTSIDE_DEPARTMENT_SCOPE' | 'NOT_IN_INITIAL_SCOPE';
+      excludedStatus?: ItemStatus;
+      message: string;
+    };
+
+/**
+ * Nuosekliai patikrina sesijos apimties taisykles (tiek serveryje, tiek UI):
+ * - Jei daiktas buvo sesijos pradžios snapshotItems sąraše, jis išlieka istorinėje apimtyje net ir vėliau pakeitus būseną (išskyrus written_off).
+ * - Sąmoningai neįtraukto statuso (in_repair / to_writeoff) turtas neleidžiamas tyliai kaip įprastas patikrinimas – reikalingas aiškus išimties sprendimas.
+ * - Kito skyriaus aktyvus turtas, rastas tikrinamo skyriaus kabinete, atskiriamas kaip papildomas radinys.
+ */
+export function evaluateItemAuditScope(
+  session: AuditSession,
+  item: InventoryItem,
+  actualRoom: Room | null | undefined,
+  options?: {
+    action?: 'check' | 'mark_missing' | 'relocate';
+    confirmExcludedStatus?: boolean;
+  }
+): AuditScopeEvaluationResult {
+  const action = options?.action || 'check';
+
+  if (item.status === 'written_off') {
+    return {
+      allowed: false,
+      code: 'WRITTEN_OFF',
+      excludedStatus: 'written_off',
+      message: `Turtas [${item.inventoryNumber}] „${item.name}“ yra nurašytas ir neįtraukiamas į aktyvaus turto inventorizaciją.`,
+    };
+  }
+
+  const snapMatch = session.snapshotItems?.find((s) => s.itemId === item.id);
+  const hasSnapshot = Array.isArray(session.snapshotItems);
+  const isInInitialScope = hasSnapshot
+    ? Boolean(snapMatch)
+    : isItemInAuditScope(item, {
+        departmentId: session.departmentId,
+        includeInRepair: session.includeInRepair,
+        includeToWriteOff: session.includeToWriteOff,
+      });
+
+  if (isInInitialScope) {
+    return {
+      allowed: true,
+      isInInitialSnapshot: true,
+      isAdditionalFinding: false,
+      excludedStatusException: false,
+    };
+  }
+
+  // Žymėti kaip trūkstamą galima tik pradinėje sesijos apimtyje buvusį turtą
+  if (action === 'mark_missing') {
+    return {
+      allowed: false,
+      code: 'NOT_IN_INITIAL_SCOPE',
+      message: `Turtas [${item.inventoryNumber}] nebuvo įtrauktas į pradinį šios inventorizacijos apimties sąrašą, todėl negali būti pažymėtas kaip trūkstamas.`,
+    };
+  }
+
+  // Tikriname, ar daiktas sąmoningai neįtrauktas pagal statusą
+  if (session.includeInRepair === false && item.status === 'in_repair') {
+    if (!options?.confirmExcludedStatus) {
+      return {
+        allowed: false,
+        code: 'EXCLUDED_BY_STATUS',
+        excludedStatus: 'in_repair',
+        message: `Turtas [${item.inventoryNumber}] „${item.name}“ yra būsenos „Remontuojamas“ ir buvo sąmoningai neįtrauktas į šios inventorizacijos apimtį.`,
+      };
+    }
+  }
+
+  if (session.includeToWriteOff === false && item.status === 'to_writeoff') {
+    if (!options?.confirmExcludedStatus) {
+      return {
+        allowed: false,
+        code: 'EXCLUDED_BY_STATUS',
+        excludedStatus: 'to_writeoff',
+        message: `Turtas [${item.inventoryNumber}] „${item.name}“ yra pateiktas nurašymui ir buvo sąmoningai neįtrauktas į šios inventorizacijos apimtį.`,
+      };
+    }
+  }
+
+  // Tikriname skyriaus ribas (papildomas kito skyriaus radinys galimas tik jei faktiškai rastas sesijos skyriaus patalpoje)
+  const expectedDeptId = snapMatch?.expectedDepartmentId || item.departmentId;
+  if (
+    session.departmentId &&
+    expectedDeptId !== session.departmentId &&
+    actualRoom?.departmentId !== session.departmentId
+  ) {
+    return {
+      allowed: false,
+      code: 'OUTSIDE_DEPARTMENT_SCOPE',
+      message: `Turtas [${item.inventoryNumber}] nepriklauso pasirinktai šios inventorizacijos skyriaus apimčiai.`,
+    };
+  }
+
+  const excludedStatusException = Boolean(
+    options?.confirmExcludedStatus &&
+      ((session.includeInRepair === false && item.status === 'in_repair') ||
+        (session.includeToWriteOff === false && item.status === 'to_writeoff'))
+  );
+
+  return {
+    allowed: true,
+    isInInitialSnapshot: false,
+    isAdditionalFinding: true,
+    excludedStatusException,
+  };
+}
+
 export type EffectiveAuditItemState = 'found' | 'found_elsewhere' | 'missing' | 'unchecked';
 
 export interface EffectiveAuditRow {
@@ -88,6 +243,9 @@ export interface EffectiveAuditRow {
   notes?: string;
   isFromSnapshot: boolean;
   isOutsideOriginalScope?: boolean;
+  isAdditionalFinding?: boolean;
+  excludedStatusException?: boolean;
+  hasIncompleteHistory?: boolean;
 }
 
 export function getEffectiveSessionRows(
@@ -145,32 +303,22 @@ export function getEffectiveSessionRows(
         checkRecord: rec,
         notes: rec?.notes,
         isFromSnapshot: true,
+        isOutsideOriginalScope: false,
+        isAdditionalFinding: false,
       });
     }
   } else {
     // Suderinamumas su senomis JSON kopijomis be snapshotItems – neišgalvojame nesančių istorinių laukų
     const legacyCandidateIds = new Set<string>();
-    if (session.status === 'in_progress') {
-      registryItems
-        .filter((item) =>
-          isItemInAuditScope(item, {
-            departmentId: session.departmentId,
-            includeInRepair: session.includeInRepair,
-            includeToWriteOff: session.includeToWriteOff,
-          })
-        )
-        .forEach((item) => legacyCandidateIds.add(item.id));
-    } else {
-      registryItems
-        .filter((item) =>
-          isItemInAuditScope(item, {
-            departmentId: session.departmentId,
-            includeInRepair: session.includeInRepair,
-            includeToWriteOff: session.includeToWriteOff,
-          })
-        )
-        .forEach((item) => legacyCandidateIds.add(item.id));
-    }
+    registryItems
+      .filter((item) =>
+        isItemInAuditScope(item, {
+          departmentId: session.departmentId,
+          includeInRepair: session.includeInRepair,
+          includeToWriteOff: session.includeToWriteOff,
+        })
+      )
+      .forEach((item) => legacyCandidateIds.add(item.id));
     session.scannedItemIds.forEach((id) => legacyCandidateIds.add(id));
     session.missingItemIds.forEach((id) => legacyCandidateIds.add(id));
     session.relocatedItemIds.forEach((id) => legacyCandidateIds.add(id));
@@ -180,58 +328,78 @@ export function getEffectiveSessionRows(
       seenIds.add(itemId);
       const item = registryMap.get(itemId);
       const rec = checkRecords[itemId];
+      const snap = rec?.itemSnapshot;
       const expDeptId = rec?.expectedDepartmentId || item?.departmentId || '';
       const expRoomId = rec?.expectedRoomId || item?.roomId || '';
       const dept = deptMap.get(expDeptId);
       const room = roomMap.get(expRoomId);
       const resp = item ? userMap.get(item.responsibleUserId) : undefined;
+      const incomplete = !snap && session.status === 'completed';
 
       rows.push({
         itemId,
-        inventoryNumber: item?.inventoryNumber || itemId,
-        serialNumber: item?.serialNumber,
-        name: item?.name || `Archyvuotas / pašalintas įrašas (${itemId})`,
-        category: item?.category || 'Kita',
+        inventoryNumber: snap?.inventoryNumber || item?.inventoryNumber || itemId,
+        serialNumber: snap ? snap.serialNumber : item?.serialNumber,
+        name:
+          snap?.name ||
+          item?.name ||
+          `Archyvuotas / pašalintas įrašas (${itemId}) – senos sesijos momentinių duomenų nėra`,
+        category: snap?.category || item?.category || 'Kita',
         expectedDepartmentId: expDeptId,
-        expectedDepartmentName: dept?.name || session.scopeDepartmentName || 'Nenurodyta',
-        expectedDepartmentCode: dept?.code,
+        expectedDepartmentName:
+          snap?.expectedDepartmentName || dept?.name || session.scopeDepartmentName || 'Nenurodyta',
+        expectedDepartmentCode: snap ? snap.expectedDepartmentCode : dept?.code,
         expectedRoomId: expRoomId,
         expectedRoomName: rec?.expectedRoomName || formatRoomName(room, true),
-        responsibleUserName: resp?.fullName || 'Nenurodyta',
-        purchasePrice: item?.purchasePrice ?? 0,
+        responsibleUserName: snap?.responsibleUserName || resp?.fullName || 'Nenurodyta',
+        purchasePrice: snap?.purchasePrice ?? item?.purchasePrice ?? 0,
         auditState: resolveAuditState(itemId),
         checkRecord: rec,
         notes: rec?.notes,
-        isFromSnapshot: false,
+        isFromSnapshot: Boolean(snap),
+        isOutsideOriginalScope: Boolean(rec?.isAdditionalFinding),
+        isAdditionalFinding: Boolean(rec?.isAdditionalFinding),
+        excludedStatusException: Boolean(rec?.excludedStatusException),
+        ...(incomplete ? { hasIncompleteHistory: true } : {}),
       });
     }
   }
 
-  // Jei sesijos metu kito skyriaus daiktas buvo faktiškai rastas čia (outside original snapshot)
+  // Papildomi radiniai (nebuvę pradiniame snapshotItems sąraše, bet patikrinti sesijos metu)
   for (const [itemId, rec] of Object.entries(checkRecords)) {
     if (seenIds.has(itemId)) continue;
-    const item = registryMap.get(itemId);
-    const dept = deptMap.get(rec.expectedDepartmentId);
-    const room = roomMap.get(rec.expectedRoomId);
-    const resp = item ? userMap.get(item.responsibleUserId) : undefined;
+    const snap = rec.itemSnapshot;
+    const item = snap ? undefined : registryMap.get(itemId);
+    const dept = snap ? undefined : deptMap.get(rec.expectedDepartmentId);
+    const room = snap ? undefined : roomMap.get(rec.expectedRoomId);
+    const resp = !snap && item ? userMap.get(item.responsibleUserId) : undefined;
+    const incomplete = !snap;
+
     rows.push({
       itemId,
-      inventoryNumber: item?.inventoryNumber || itemId,
-      serialNumber: item?.serialNumber,
-      name: item?.name || `Daiktas (${itemId})`,
-      category: item?.category || 'Kita',
+      inventoryNumber: snap?.inventoryNumber || item?.inventoryNumber || itemId,
+      serialNumber: snap ? snap.serialNumber : item?.serialNumber,
+      name:
+        snap?.name ||
+        item?.name ||
+        `Pašalintas įrašas (${itemId}) – nėra momentinių duomenų`,
+      category: snap?.category || item?.category || 'Kita',
       expectedDepartmentId: rec.expectedDepartmentId,
-      expectedDepartmentName: dept?.name || 'Kitas skyrius',
-      expectedDepartmentCode: dept?.code,
+      expectedDepartmentName:
+        snap?.expectedDepartmentName || dept?.name || 'Kitas skyrius (duomenys riboti)',
+      expectedDepartmentCode: snap ? snap.expectedDepartmentCode : dept?.code,
       expectedRoomId: rec.expectedRoomId,
       expectedRoomName: rec.expectedRoomName || formatRoomName(room, true),
-      responsibleUserName: resp?.fullName || 'Nenurodyta',
-      purchasePrice: item?.purchasePrice ?? 0,
+      responsibleUserName: snap?.responsibleUserName || resp?.fullName || 'Nenurodyta',
+      purchasePrice: snap?.purchasePrice ?? item?.purchasePrice ?? 0,
       auditState: rec.outcome,
       checkRecord: rec,
       notes: rec.notes,
       isFromSnapshot: false,
       isOutsideOriginalScope: true,
+      isAdditionalFinding: true,
+      excludedStatusException: Boolean(rec.excludedStatusException),
+      ...(incomplete ? { hasIncompleteHistory: true } : {}),
     });
   }
 
@@ -252,17 +420,24 @@ export interface AuditProgressStats {
   foundElsewhereCount: number;
   missingCount: number;
   uncheckedCount: number;
+  additionalFindingsCount: number;
   progressPercent: number;
 }
 
 export function computeAuditStats(rows: EffectiveAuditRow[]): AuditProgressStats {
-  const total = rows.length;
+  let total = 0;
   let foundInPlaceCount = 0;
   let foundElsewhereCount = 0;
   let missingCount = 0;
   let uncheckedCount = 0;
+  let additionalFindingsCount = 0;
 
   for (const r of rows) {
+    if (r.isOutsideOriginalScope || r.isAdditionalFinding) {
+      additionalFindingsCount++;
+      continue;
+    }
+    total++;
     if (r.auditState === 'found') foundInPlaceCount++;
     else if (r.auditState === 'found_elsewhere') foundElsewhereCount++;
     else if (r.auditState === 'missing') missingCount++;
@@ -280,6 +455,7 @@ export function computeAuditStats(rows: EffectiveAuditRow[]): AuditProgressStats
     foundElsewhereCount,
     missingCount,
     uncheckedCount,
+    additionalFindingsCount,
     progressPercent,
   };
 }

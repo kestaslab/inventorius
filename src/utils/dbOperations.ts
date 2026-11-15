@@ -23,7 +23,12 @@ import {
   generateNextWriteOffActNumber,
   isWriteOffActNumberUnique,
 } from './writeOffUtils';
-import { buildAuditSnapshotItems, isItemInAuditScope } from './auditUtils';
+import {
+  buildAuditCheckItemSnapshot,
+  buildAuditSnapshotItems,
+  evaluateItemAuditScope,
+  isItemInAuditScope,
+} from './auditUtils';
 
 export type DbMutation =
   | { type: 'SAVE_ITEM'; item: InventoryItem }
@@ -144,6 +149,7 @@ export type DbMutation =
       checkedByUserName: string;
       checkedAt?: string;
       notes?: string;
+      confirmExcludedStatus?: boolean;
     }
   | {
       type: 'MARK_AUDIT_ITEM_MISSING';
@@ -167,6 +173,7 @@ export type DbMutation =
       sessionId?: string;
       transferredByUserId?: string;
       transferredByUserName?: string;
+      confirmExcludedStatus?: boolean;
     };
 
 export function getTouchedEntityKeys(db: AppDatabase, op: DbMutation): string[] {
@@ -2027,43 +2034,54 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
       if (!targetItem) {
         return { ok: false, statusCode: 404, error: 'Turtas nerastas.' };
       }
-      if (targetItem.status === 'written_off') {
-        return {
-          ok: false,
-          statusCode: 400,
-          error: `Turtas [${targetItem.inventoryNumber}] yra nurašytas ir neįtraukiamas į aktyvaus turto inventorizaciją.`,
-        };
-      }
 
       const actualRoom = db.rooms.find((r) => r.id === op.actualRoomId);
       if (!actualRoom) {
         return { ok: false, statusCode: 404, error: 'Nurodytas tikrinimo kabinetas nerastas.' };
       }
 
-      const snapMatch = session.snapshotItems?.find((s) => s.itemId === op.itemId);
-      const expectedDeptId = snapMatch?.expectedDepartmentId || targetItem.departmentId;
-      const expectedRoomId = snapMatch?.expectedRoomId || targetItem.roomId;
-
-      if (
-        session.departmentId &&
-        expectedDeptId !== session.departmentId &&
-        actualRoom.departmentId !== session.departmentId
-      ) {
+      const scopeEval = evaluateItemAuditScope(session, targetItem, actualRoom, {
+        action: 'check',
+        confirmExcludedStatus: op.confirmExcludedStatus,
+      });
+      if (!scopeEval.allowed) {
         return {
           ok: false,
           statusCode: 400,
-          error: `Turtas [${targetItem.inventoryNumber}] nepriklauso pasirinktai šios inventorizacijos skyriaus apimčiai.`,
+          error: scopeEval.message,
         };
       }
 
+      const existingRecord = session.checkRecords?.[op.itemId];
+      const snapMatch = session.snapshotItems?.find((s) => s.itemId === op.itemId);
+      const expectedDeptId =
+        snapMatch?.expectedDepartmentId || existingRecord?.expectedDepartmentId || targetItem.departmentId;
+      const expectedRoomId =
+        snapMatch?.expectedRoomId || existingRecord?.expectedRoomId || targetItem.roomId;
+
       const expectedRoom = db.rooms.find((r) => r.id === expectedRoomId);
-      const expectedRoomName = snapMatch?.expectedRoomName || formatRoomName(expectedRoom, true);
+      const expectedRoomName =
+        snapMatch?.expectedRoomName ||
+        existingRecord?.expectedRoomName ||
+        formatRoomName(expectedRoom, true);
       const actualRoomName = formatRoomName(actualRoom, true);
       const outcome = expectedRoomId === actualRoom.id ? 'found' : 'found_elsewhere';
       const checkedAt = op.checkedAt || nowIso;
       const auditDateOnly = checkedAt.slice(0, 10);
 
-      const existingRecord = session.checkRecords?.[op.itemId];
+      const itemSnapshot =
+        existingRecord?.itemSnapshot ||
+        buildAuditCheckItemSnapshot(
+          { departments: db.departments, users: db.users },
+          targetItem,
+          expectedDeptId,
+          snapMatch
+        );
+      const isAdditionalFinding = existingRecord?.isAdditionalFinding ?? scopeEval.isAdditionalFinding;
+      const excludedStatusException = Boolean(
+        existingRecord?.excludedStatusException || scopeEval.excludedStatusException
+      );
+
       const nextRecord: AuditCheckRecord = {
         itemId: op.itemId,
         outcome,
@@ -2077,6 +2095,9 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
         actualDepartmentId: actualRoom.departmentId,
         actualRoomId: actualRoom.id,
         actualRoomName,
+        isAdditionalFinding,
+        ...(excludedStatusException ? { excludedStatusException: true } : {}),
+        itemSnapshot,
         ...(existingRecord?.officialTransferDone
           ? {
               officialTransferDone: existingRecord.officialTransferDone,
@@ -2135,6 +2156,23 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
           statusCode: 400,
           error: 'Užbaigtos inventorizacijos sesijos rezultatų keisti negalima.',
         };
+      }
+      const targetItem = db.items.find((i) => i.id === op.itemId);
+      const inSnapshot = session.snapshotItems?.some((s) => s.itemId === op.itemId) ?? false;
+      if (!targetItem && !inSnapshot) {
+        return { ok: false, statusCode: 404, error: 'Turtas nerastas.' };
+      }
+      if (targetItem) {
+        const scopeEval = evaluateItemAuditScope(session, targetItem, null, {
+          action: 'mark_missing',
+        });
+        if (!scopeEval.allowed) {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: scopeEval.message,
+          };
+        }
       }
       if (session.checkRecords?.[op.itemId] || session.scannedItemIds.includes(op.itemId)) {
         return {
@@ -2217,12 +2255,12 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
         }
       }
 
-      // Taip pat suskaičiuojame kito skyriaus daiktus, jei buvo patikrinti sesijos patalpose
+      // Papildomus radinius (nebuvusius pradiniame sąraše) skaičiuojame atskirai, kad pradinė apimtis nesikeistų
       const snapIds = new Set(frozenSnapshot.map((s) => s.itemId));
-      for (const [id, rec] of Object.entries(checkRecords)) {
+      let additionalFindingsCount = 0;
+      for (const id of Object.keys(checkRecords)) {
         if (!snapIds.has(id)) {
-          if (rec.outcome === 'found_elsewhere') foundElsewhereCount++;
-          else foundInPlaceCount++;
+          additionalFindingsCount++;
         }
       }
 
@@ -2241,6 +2279,7 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
                 foundInPlaceCount,
                 foundElsewhereCount,
                 missingCount: finalMissingIds.size,
+                additionalFindingsCount,
               },
               ...(op.notes !== undefined ? { notes: op.notes } : {}),
             }
@@ -2254,12 +2293,13 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
     }
 
     case 'RELOCATE_AUDIT_ITEM': {
+      let targetSession: AuditSession | undefined;
       if (op.sessionId) {
-        const session = db.auditSessions.find((s) => s.id === op.sessionId);
-        if (!session) {
+        targetSession = db.auditSessions.find((s) => s.id === op.sessionId);
+        if (!targetSession) {
           return { ok: false, statusCode: 404, error: 'Inventorizacijos sesija nerasta.' };
         }
-        if (session.status === 'completed') {
+        if (targetSession.status === 'completed') {
           return {
             ok: false,
             statusCode: 400,
@@ -2283,6 +2323,22 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
       if (!targetRoom) {
         return { ok: false, statusCode: 404, error: 'Tikslinis kabinetas nerastas.' };
       }
+
+      let relocateScopeEval: ReturnType<typeof evaluateItemAuditScope> | null = null;
+      if (targetSession) {
+        relocateScopeEval = evaluateItemAuditScope(targetSession, targetItem, targetRoom, {
+          action: 'relocate',
+          confirmExcludedStatus: op.confirmExcludedStatus,
+        });
+        if (!relocateScopeEval.allowed) {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: relocateScopeEval.message,
+          };
+        }
+      }
+
       const nextResponsibleUserId =
         targetRoom.defaultResponsiblePersonId || targetItem.responsibleUserId;
       let movements = db.movements;
@@ -2326,10 +2382,25 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
           const prevRec = s.checkRecords?.[op.itemId];
           const snapMatch = s.snapshotItems?.find((sn) => sn.itemId === op.itemId);
           const expectedDeptId =
-            prevRec?.expectedDepartmentId || snapMatch?.expectedDepartmentId || targetItem.departmentId;
+            snapMatch?.expectedDepartmentId || prevRec?.expectedDepartmentId || targetItem.departmentId;
           const expectedRoomId =
-            prevRec?.expectedRoomId || snapMatch?.expectedRoomId || targetItem.roomId;
+            snapMatch?.expectedRoomId || prevRec?.expectedRoomId || targetItem.roomId;
           const expectedRoom = db.rooms.find((r) => r.id === expectedRoomId);
+          const itemSnapshot =
+            prevRec?.itemSnapshot ||
+            buildAuditCheckItemSnapshot(
+              { departments: db.departments, users: db.users },
+              targetItem,
+              expectedDeptId,
+              snapMatch
+            );
+          const isAdditionalFinding =
+            prevRec?.isAdditionalFinding ??
+            (relocateScopeEval?.allowed ? relocateScopeEval.isAdditionalFinding : false);
+          const excludedStatusException = Boolean(
+            prevRec?.excludedStatusException ||
+              (relocateScopeEval?.allowed && relocateScopeEval.excludedStatusException)
+          );
 
           const updatedRec: AuditCheckRecord = {
             itemId: op.itemId,
@@ -2342,12 +2413,15 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
             expectedDepartmentId: expectedDeptId,
             expectedRoomId,
             expectedRoomName:
-              prevRec?.expectedRoomName ||
               snapMatch?.expectedRoomName ||
+              prevRec?.expectedRoomName ||
               formatRoomName(expectedRoom, true),
             actualDepartmentId: targetRoom.departmentId,
             actualRoomId: targetRoom.id,
             actualRoomName: formatRoomName(targetRoom, true),
+            isAdditionalFinding,
+            ...(excludedStatusException ? { excludedStatusException: true } : {}),
+            itemSnapshot,
             officialTransferDone: true,
             ...(createdMovementId ? { officialMovementId: createdMovementId } : {}),
             officialTransferredAt: nowIso,

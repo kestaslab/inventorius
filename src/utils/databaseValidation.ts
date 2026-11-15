@@ -1014,6 +1014,53 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
             error: `${ctx} -> checkRecords[${key}]: neteisinga patikrinimo įrašo struktūra.`,
           };
         }
+        if (rec.isAdditionalFinding !== undefined && typeof rec.isAdditionalFinding !== 'boolean') {
+          return {
+            ok: false,
+            error: `${ctx} -> checkRecords[${key}]: „isAdditionalFinding“ turi būti loginė reikšmė.`,
+          };
+        }
+        if (
+          rec.excludedStatusException !== undefined &&
+          typeof rec.excludedStatusException !== 'boolean'
+        ) {
+          return {
+            ok: false,
+            error: `${ctx} -> checkRecords[${key}]: „excludedStatusException“ turi būti loginė reikšmė.`,
+          };
+        }
+        if (rec.itemSnapshot !== undefined) {
+          const snap = rec.itemSnapshot;
+          if (
+            !isPlainObject(snap) ||
+            !isNonEmptyString(snap.inventoryNumber) ||
+            !isNonEmptyString(snap.name) ||
+            !isNonEmptyString(snap.expectedDepartmentName) ||
+            !isNonEmptyString(snap.responsibleUserName) ||
+            typeof snap.purchasePrice !== 'number' ||
+            !Number.isFinite(snap.purchasePrice)
+          ) {
+            return {
+              ok: false,
+              error: `${ctx} -> checkRecords[${key}].itemSnapshot: neteisingi momentinių duomenų laukai.`,
+            };
+          }
+        }
+      }
+    }
+
+    if (s.completionSummary !== undefined) {
+      if (
+        !isPlainObject(s.completionSummary) ||
+        typeof s.completionSummary.totalExpected !== 'number' ||
+        typeof s.completionSummary.foundInPlaceCount !== 'number' ||
+        typeof s.completionSummary.foundElsewhereCount !== 'number' ||
+        typeof s.completionSummary.missingCount !== 'number'
+      ) {
+        return {
+          ok: false,
+          error: `${ctx}: neteisinga „completionSummary“ struktūra.`,
+        };
       }
     }
 

@@ -309,6 +309,20 @@ export interface AuditSnapshotItem {
   statusAtStart: ItemStatus;
 }
 
+export interface AuditCheckItemSnapshot {
+  inventoryNumber: string;
+  serialNumber?: string;
+  name: string;
+  category: ItemCategory;
+  expectedDepartmentName: string;
+  expectedDepartmentCode?: string;
+  responsibleUserId: string;
+  responsibleUserName: string;
+  purchasePrice: number;
+  residualValue?: number;
+  statusAtCheck: ItemStatus;
+}
+
 export interface AuditCheckRecord {
   itemId: string;
   outcome: AuditCheckOutcome;
@@ -322,6 +336,9 @@ export interface AuditCheckRecord {
   actualDepartmentId: string;
   actualRoomId: string;
   actualRoomName?: string;
+  isAdditionalFinding?: boolean;
+  excludedStatusException?: boolean;
+  itemSnapshot?: AuditCheckItemSnapshot;
   officialTransferDone?: boolean;
   officialMovementId?: string;
   officialTransferredAt?: string;
@@ -334,6 +351,7 @@ export interface AuditCompletionSummary {
   foundInPlaceCount: number;
   foundElsewhereCount: number;
   missingCount: number;
+  additionalFindingsCount?: number;
 }
 
 export interface AuditSession {
