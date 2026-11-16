@@ -30,7 +30,7 @@ import {
   getBarcodeValue,
   renderCode128PngBytes,
 } from './labelUtils';
-import { cloneOrganizationSettings } from './organization';
+import { cloneOrganizationSettings, hasConfirmedOrganizationSettings } from './organization';
 import { buildItemQrPayload } from './qrUtils';
 import {
   AuditSessionReportData,
@@ -1098,6 +1098,11 @@ export async function generateReportDocxBlob(report: ResolvedReportData): Promis
   if (report.isEmpty) {
     throw new Error(report.emptyReason || 'Negalima sugeneruoti tuščios ataskaitos.');
   }
+  if (!report.hasConfirmedOrganization) {
+    throw new Error(
+      'Prieš formuojant oficialų dokumentą būtina patvirtinti įstaigos rekvizitus skiltyje „Ataskaitos ir aktai“.'
+    );
+  }
   const doc = buildReportDocxDocument(report);
   return Packer.toBlob(doc);
 }
@@ -1105,6 +1110,11 @@ export async function generateReportDocxBlob(report: ResolvedReportData): Promis
 export async function generateReportDocxBuffer(report: ResolvedReportData): Promise<Buffer> {
   if (report.isEmpty) {
     throw new Error(report.emptyReason || 'Negalima sugeneruoti tuščios ataskaitos.');
+  }
+  if (!report.hasConfirmedOrganization) {
+    throw new Error(
+      'Prieš formuojant oficialų dokumentą būtina patvirtinti įstaigos rekvizitus skiltyje „Ataskaitos ir aktai“.'
+    );
   }
   const doc = buildReportDocxDocument(report);
   return Packer.toBuffer(doc);
@@ -1161,6 +1171,11 @@ export async function buildLabelsDocxDocument(
 
   if (!items || items.length === 0) {
     throw new Error('Nepasirinkta nė vieno daikto etikečių eksportui.');
+  }
+  if (!hasConfirmedOrganizationSettings(organization)) {
+    throw new Error(
+      'Prieš formuojant oficialų etikečių dokumentą būtina patvirtinti įstaigos rekvizitus.'
+    );
   }
 
   const org = cloneOrganizationSettings(organization);

@@ -781,7 +781,7 @@ test('Stage 5: Calendar YYYY-MM-DD and Europe/Vilnius timestamps avoid off-by-on
   assert.ok(calculateCalendarAgeYears('2020-01-01', '2025-01-01') >= 4.99);
 });
 
-test('Stage 5: Legacy JSON backup without organizationSettings validates and migrates cleanly', () => {
+test('Stage 5: Legacy JSON backup without organizationSettings validates and migrates cleanly without faking defaults', () => {
   const legacyPayload = buildFixtureDb(1) as unknown as Record<string, unknown>;
   delete legacyPayload.organizationSettings;
   legacyPayload.version = '1.0.0';
@@ -790,6 +790,7 @@ test('Stage 5: Legacy JSON backup without organizationSettings validates and mig
   assert.equal(result.ok, true);
   if (result.ok) {
     assert.equal(result.migrated, true);
-    assert.equal(result.data.organizationSettings?.code, DEFAULT_ORGANIZATION_SETTINGS.code);
+    assert.equal(result.data.organizationSettings, undefined);
+    assert.ok(result.warnings.some((w) => w.includes('organizationSettings')));
   }
 });

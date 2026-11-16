@@ -1,5 +1,5 @@
-version: '3.8'
-
+# Svarbu: paleiskite tik 1 konteinerio egzempliorių (replicas: 1),
+# nes school_database.json užraktas (withDbLock) ir revizijų istorija veikia vieno proceso atmintyje.
 services:
   mokyklos-inventorius:
     build: .
@@ -10,11 +10,15 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
+      - DATA_DIR=/app/data
     volumes:
-      # Duomenų bazės / atsarginių kopijų saugykla Proxmox serveryje
+      # Nuolatinė duomenų bazės (school_database.json), nuotraukų (photos/) ir automatinių kopijų (backups/) saugykla
       - ./data:/app/data
+    deploy:
+      replicas: 1
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 15s

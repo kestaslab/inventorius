@@ -34,7 +34,9 @@ import {
 } from './accountingUtils';
 import { buildCsvContent, CsvCellValue, formatCsvMoney, formatCsvOptionalMoney } from './csvUtils';
 import { getCalendarDatePart, getTodayVilniusDate } from './dateUtils';
-import { cloneOrganizationSettings, resolveOrganizationForDocument } from './organization';
+import {
+  resolveOrganizationForDocument,
+} from './organization';
 import { getWriteOffActYear } from './writeOffUtils';
 
 export type ReportKind =
@@ -105,6 +107,7 @@ export interface AuditSessionReportData {
   kind: 'audit_session_sheet';
   session: AuditSession | null;
   organization: OrganizationSettings;
+  hasConfirmedOrganization: boolean;
   usesFallbackCurrentOrg: boolean;
   generatedDate: string;
   documentNumber: string;
@@ -141,10 +144,12 @@ export function buildAuditSessionReportData(params: {
   const deptFilter = params.departmentFilterId || 'all';
 
   if (!params.session) {
+    const orgRes = resolveOrganizationForDocument(undefined, params.organizationSettings, false);
     return {
       kind: 'audit_session_sheet',
       session: null,
-      organization: cloneOrganizationSettings(params.organizationSettings),
+      organization: orgRes.organization,
+      hasConfirmedOrganization: orgRes.hasConfirmedOrganization,
       usesFallbackCurrentOrg: false,
       generatedDate,
       documentNumber: '—',
@@ -176,11 +181,12 @@ export function buildAuditSessionReportData(params: {
   }
 
   const session = params.session;
-  const { organization, usesFallbackCurrentOrg } = resolveOrganizationForDocument(
-    session.organizationSnapshot,
-    params.organizationSettings,
-    session.status === 'completed'
-  );
+  const { organization, hasConfirmedOrganization, usesFallbackCurrentOrg } =
+    resolveOrganizationForDocument(
+      session.organizationSnapshot,
+      params.organizationSettings,
+      session.status === 'completed'
+    );
 
   const effectiveDeptFilter =
     deptFilter !== 'all' ? deptFilter : session.departmentId || 'all';
@@ -242,6 +248,7 @@ export function buildAuditSessionReportData(params: {
     kind: 'audit_session_sheet',
     session,
     organization,
+    hasConfirmedOrganization,
     usesFallbackCurrentOrg,
     generatedDate,
     documentNumber: docNumber,
@@ -287,6 +294,7 @@ export interface RegistrySheetRow {
 export interface RegistrySheetReportData {
   kind: 'inventory_sheet';
   organization: OrganizationSettings;
+  hasConfirmedOrganization: boolean;
   generatedDate: string;
   documentNumber: string;
   documentTitle: string;
@@ -319,7 +327,11 @@ export function buildRegistrySheetReportData(params: {
   generatedDate?: string;
 }): RegistrySheetReportData {
   const generatedDate = params.generatedDate || getTodayVilniusDate();
-  const organization = cloneOrganizationSettings(params.organizationSettings);
+  const { organization, hasConfirmedOrganization } = resolveOrganizationForDocument(
+    undefined,
+    params.organizationSettings,
+    false
+  );
   const {
     departmentId = 'all',
     roomId = 'all',
@@ -389,6 +401,7 @@ export function buildRegistrySheetReportData(params: {
   return {
     kind: 'inventory_sheet',
     organization,
+    hasConfirmedOrganization,
     generatedDate,
     documentNumber: `REG-${generatedDate}`,
     documentTitle,
@@ -423,6 +436,7 @@ export interface WriteOffActReportData {
   kind: 'writeoff_act';
   act: WriteOffAct | null;
   organization: OrganizationSettings;
+  hasConfirmedOrganization: boolean;
   usesFallbackCurrentOrg: boolean;
   generatedDate: string;
   actYear: number | null;
@@ -445,10 +459,12 @@ export function buildWriteOffActReportData(params: {
 }): WriteOffActReportData {
   const generatedDate = params.generatedDate || getTodayVilniusDate();
   if (!params.act) {
+    const orgRes = resolveOrganizationForDocument(undefined, params.organizationSettings, false);
     return {
       kind: 'writeoff_act',
       act: null,
-      organization: cloneOrganizationSettings(params.organizationSettings),
+      organization: orgRes.organization,
+      hasConfirmedOrganization: orgRes.hasConfirmedOrganization,
       usesFallbackCurrentOrg: false,
       generatedDate,
       actYear: null,
@@ -465,11 +481,12 @@ export function buildWriteOffActReportData(params: {
   }
 
   const act = params.act;
-  const { organization, usesFallbackCurrentOrg } = resolveOrganizationForDocument(
-    act.organizationSnapshot,
-    params.organizationSettings,
-    act.status === 'approved'
-  );
+  const { organization, hasConfirmedOrganization, usesFallbackCurrentOrg } =
+    resolveOrganizationForDocument(
+      act.organizationSnapshot,
+      params.organizationSettings,
+      act.status === 'approved'
+    );
 
   const itemMap = new Map(params.items.map((i) => [i.id, i]));
   const rows: WriteOffActReportRow[] = act.items.map((actItem) => {
@@ -517,6 +534,7 @@ export function buildWriteOffActReportData(params: {
     kind: 'writeoff_act',
     act,
     organization,
+    hasConfirmedOrganization,
     usesFallbackCurrentOrg,
     generatedDate,
     actYear: getWriteOffActYear(act),
@@ -554,6 +572,7 @@ export interface UserSheetReportData {
   kind: 'user_sheet';
   targetUser: User | null;
   organization: OrganizationSettings;
+  hasConfirmedOrganization: boolean;
   generatedDate: string;
   documentNumber: string;
   documentTitle: string;
@@ -573,7 +592,11 @@ export function buildUserSheetReportData(params: {
   generatedDate?: string;
 }): UserSheetReportData {
   const generatedDate = params.generatedDate || getTodayVilniusDate();
-  const organization = cloneOrganizationSettings(params.organizationSettings);
+  const { organization, hasConfirmedOrganization } = resolveOrganizationForDocument(
+    undefined,
+    params.organizationSettings,
+    false
+  );
   const assetClassFilter = params.assetClassFilter || 'all';
 
   if (!params.targetUser) {
@@ -581,6 +604,7 @@ export function buildUserSheetReportData(params: {
       kind: 'user_sheet',
       targetUser: null,
       organization,
+      hasConfirmedOrganization,
       generatedDate,
       documentNumber: `KORT-${generatedDate}`,
       documentTitle: 'MATERIALIAI ATSAKINGO ASMENS TURTO KORTELĖ',
@@ -621,6 +645,7 @@ export function buildUserSheetReportData(params: {
     kind: 'user_sheet',
     targetUser,
     organization,
+    hasConfirmedOrganization,
     generatedDate,
     documentNumber: `KORT-${generatedDate}`,
     documentTitle: 'MATERIALIAI ATSAKINGO ASMENS TURTO KORTELĖ',

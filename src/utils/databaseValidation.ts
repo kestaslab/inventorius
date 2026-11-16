@@ -22,7 +22,6 @@ import {
   ComputerSpecs,
 } from '../types/inventory';
 import { analyzeWriteOffIntegrity } from './writeOffUtils';
-import { DEFAULT_ORGANIZATION_SETTINGS, cloneOrganizationSettings } from './organization';
 
 export const CURRENT_DB_VERSION = '1.1.0';
 export const SUPPORTED_DB_VERSIONS = ['1.0.0', '1.1.0'] as const;
@@ -1149,13 +1148,17 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
     authSettings = as as unknown as AuthSettings;
   }
 
-  // 10b. Įstaigos rekvizitai (jei trūksta senoje kopijoje – priskiriami numatytieji)
+  // 10b. Įstaigos rekvizitai – išsaugome esamus, o jei senoje kopijoje jų nėra, NEpriskiriame dabartinės mokyklos kaip patvirtinto fakto
   const orgCheck = validateOrganizationSettingsValue(raw.organizationSettings, 'organizationSettings');
   if (!orgCheck.ok) {
     return orgCheck;
   }
-  const organizationSettings =
-    orgCheck.value ?? cloneOrganizationSettings(DEFAULT_ORGANIZATION_SETTINGS);
+  const organizationSettings = orgCheck.value;
+  if (!organizationSettings) {
+    warnings.push(
+      'Kopijoje nėra įstaigos rekvizitų (organizationSettings) – esamai mokyklai jie nebuvo priskirti automatiškai. Prieš formuojant oficialius dokumentus patvirtinkite įstaigos rekvizitus.'
+    );
+  }
 
   // 11. Nuotraukų paketas atsarginėje kopijoje (jei yra)
   let photos: Record<string, string> | undefined;

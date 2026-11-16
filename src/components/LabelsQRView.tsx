@@ -29,7 +29,7 @@ import {
 } from '../types/inventory';
 import { directPrintBrotherLabels } from '../utils/brotherPrinter';
 import { buildItemQrPayload } from '../utils/qrUtils';
-import { DEFAULT_ORGANIZATION_SETTINGS } from '../utils/organization';
+import { hasConfirmedOrganizationSettings } from '../utils/organization';
 import { buildCsvContent } from '../utils/csvUtils';
 import {
   CODE_TYPE_LABELS,
@@ -138,8 +138,10 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
     }
   }, [preSelectedIds]);
 
-  const schoolDisplayName =
-    organizationSettings?.name?.trim() || DEFAULT_ORGANIZATION_SETTINGS.name;
+  const hasConfirmedOrg = hasConfirmedOrganizationSettings(organizationSettings);
+  const schoolDisplayName = hasConfirmedOrg
+    ? organizationSettings!.name.trim()
+    : 'Įstaigos rekvizitai nepatvirtinti';
 
   // Filtered active items (never includes written_off; honors preSelectedIds strictly)
   const activeItems = useMemo(() => {
@@ -218,6 +220,15 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
   const handlePrintSingle = async (itemToPrint?: InventoryItem) => {
     const target = itemToPrint || focusedItem;
     if (!target) return;
+    if (!hasConfirmedOrg) {
+      setPrintState({
+        status: 'error',
+        targetItemId: target.id,
+        errorMessage:
+          'Prieš spausdinant oficialią etiketę patvirtinkite įstaigos rekvizitus skiltyje „Ataskaitos ir aktai“.',
+      });
+      return;
+    }
 
     setPrintState({ status: 'preparing', targetItemId: target.id });
 
@@ -427,6 +438,15 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
                 Nustatykite „Margins: None“ ir išjunkite „Headers and footers“. Užklijavus etiketę, ranka patvirtinkite paženklinimą.
               </p>
             </div>
+          </div>
+        </div>
+      )}
+
+      {!hasConfirmedOrg && (
+        <div className="bg-amber-50 border border-amber-300 rounded-xl p-3.5 flex items-start gap-2.5 text-xs text-amber-950">
+          <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+          <div>
+            <strong>Įstaigos rekvizitai nepatvirtinti:</strong> importuotoje senojoje kopijoje nebuvo nurodyti įstaigos rekvizitai. Oficialių etikečių spausdinimas ir DOCX eksportas išjungti, kol administratorius ar ūkvedys patvirtins įstaigos rekvizitus skiltyje „Ataskaitos ir aktai“.
           </div>
         </div>
       )}
@@ -729,7 +749,7 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
                     <button
                       type="button"
                       onClick={() => void handlePrintSingle(focusedItem)}
-                      disabled={isPrinting}
+                      disabled={isPrinting || !hasConfirmedOrg}
                       className="w-full py-3.5 px-6 rounded-xl font-extrabold text-base transition-all shadow-lg flex items-center justify-center gap-3 cursor-pointer bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-400 hover:to-indigo-500 text-white disabled:opacity-60"
                     >
                       <Printer className="w-5 h-5" />
@@ -964,7 +984,7 @@ export const LabelsQRView: React.FC<LabelsQRViewProps> = ({
                 </button>
                 <button
                   type="button"
-                  disabled={listToExport.length === 0 || isExportingDocx}
+                  disabled={listToExport.length === 0 || isExportingDocx || !hasConfirmedOrg}
                   onClick={() => void handleDownloadWordLabels()}
                   className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-45 disabled:cursor-not-allowed rounded-lg transition-colors cursor-pointer shadow-sm"
                 >

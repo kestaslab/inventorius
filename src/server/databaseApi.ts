@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import {
   AppDatabase,
   CURRENT_DB_VERSION,
+  SUPPORTED_DB_VERSIONS,
   validateAndMigrateDatabase,
 } from '../utils/databaseValidation.ts';
 import {
@@ -359,25 +360,62 @@ export function createDatabaseApiRouter(options: DatabaseApiOptions) {
     console.error('Pradinio duomenų bazės patikrinimo klaida:', err);
   }
 
-  // Health Check
+  // Health Check (tikrina duomenų katalogo pasiekiamumą, JSON struktūrą ir schemos versiją)
   router.get('/api/health', (_req, res) => {
     try {
+      fs.accessSync(DATA_DIR, fs.constants.R_OK | fs.constants.W_OK);
       const dbExists = fs.existsSync(DB_FILE);
-      let revision = 0;
-      if (dbExists) {
-        const raw = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
-        revision = typeof raw.revision === 'number' ? raw.revision : 1;
-      }
       const photoCount = fs.existsSync(PHOTOS_DIR) ? fs.readdirSync(PHOTOS_DIR).length : 0;
-      res.json({
+
+      if (!dbExists) {
+        return res.json({
+          status: 'ok',
+          initialized: false,
+          serverTime: new Date().toISOString(),
+          dbExists: false,
+          revision: 0,
+          schemaVersion: CURRENT_DB_VERSION,
+          supportedVersions: [...SUPPORTED_DB_VERSIONS],
+          photoCount,
+          singleProcessMode: true,
+        });
+      }
+
+      const rawText = fs.readFileSync(DB_FILE, 'utf-8');
+      const parsed = JSON.parse(rawText) as Record<string, unknown>;
+      const rawVersion = typeof parsed?.version === 'string' ? parsed.version : 'unknown';
+      const validation = validateAndMigrateDatabase(parsed);
+      if (!validation.ok) {
+        return res.status(503).json({
+          status: 'error',
+          initialized: true,
+          dbExists: true,
+          schemaVersion: rawVersion,
+          supportedVersions: [...SUPPORTED_DB_VERSIONS],
+          error: validation.error,
+        });
+      }
+
+      const revision =
+        typeof validation.data.revision === 'number' ? validation.data.revision : 1;
+
+      return res.json({
         status: 'ok',
+        initialized: true,
         serverTime: new Date().toISOString(),
-        dbExists,
+        dbExists: true,
         revision,
+        schemaVersion: rawVersion,
+        migratedPending: validation.migrated,
+        supportedVersions: [...SUPPORTED_DB_VERSIONS],
         photoCount,
+        singleProcessMode: true,
       });
-    } catch (err) {
-      res.status(500).json({ status: 'error', error: String(err) });
+    } catch (err: any) {
+      return res.status(503).json({
+        status: 'error',
+        error: err?.message || String(err),
+      });
     }
   });
 

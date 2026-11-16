@@ -118,12 +118,31 @@
   - Tušti ar praleisti CSV langeliai išsaugo esamus darbuotojo duomenis ir `assignedRoomIds`; palaikomi keli kabinetai; atnaujinant paštą tikrinama be raidžių registro skirtumo; archyvuoti darbuotojai išlieka archyvuoti ir neaktyvūs.
   - Masinis importas (`BATCH_IMPORT_USERS`) serveryje yra atominis („viskas arba nieko“) ir **niekada** nekeičia esamų naudotojų `role`, `pinCode`, `isActive` ar `isArchived` laukų (palikta aiški saugumo pastaba dėl ignoruojamų `Rolė`/`PIN` stulpelių).
 
+### 7 etapas – Diegimas ir galutinė patikra (Atlikta paruošimo apimtis)
+- **Nuoseklus paketų valdymas ir serverio paleidimas (`Dockerfile`, `docker-compose.yml`, `package.json`, `bun.lock`, `server.ts`, `update.sh`, `.env.example`, `.gitignore`):**
+  - Visi diegimo ir atnaujinimo būdai suvienodinti ant **`bun`** ir **`bun.lock`** (`bun install --frozen-lockfile --dry-run` patikrintas sėkmingai). `tsx` perkeltas į `dependencies`, todėl produkcinė aplinka paleidžia `server.ts` be `devDependencies`.
+  - `Dockerfile` perrašytas į daugiapakopį vaizdą su `bun` ir `server.ts` (`DATA_DIR=/app/data`, produkcinis `dist/` + `/api/*`), `docker-compose.yml` pašalintas pasenęs `version: '3.8'`, įrašytas vieno proceso ribojimas (`replicas: 1`) dėl `withDbLock` atmintyje ir `/api/health` tikrinimas.
+  - `server.ts` papildytas konfigūruojamu `DATA_DIR`, JSON `404` gaudykle visiems nežinomiems `/api/*` maršrutams (kad niekada negrąžintų SPA HTML), `dist/index.html` patikra produkcijos režime ir tvarkingu stabdymu (`SIGINT`/`SIGTERM`).
+  - `/api/health` (`src/server/databaseApi.ts`) tikrina `DATA_DIR` skaitymo/rašymo teises, `school_database.json` sintaksę ir schemos versiją (sugadintam JSON ar naujesnei versijai grąžina HTTP `503`).
+- **Saugus atnaujinimas, atsarginės kopijos ir atkūrimas (`scripts/db-cli.ts`, `scripts/backup-data.sh`, `scripts/restore-data.sh`, `PROXMOX_DIEGIMAS.md`, `src/components/SelfHostView.tsx`):**
+  - Pakeistas `update.sh`: pašalinti destruktyvūs `git reset --hard`, `git clean -fd` bei klaidinantis slaptažodžio pranešimas; prieš atnaujinimą patikrinami neužfiksuoti pakeitimai, sukuriama pilna kopija, vykdomas `git pull --ff-only`, `bun install --frozen-lockfile`, `bun run build`, perkraunamas vienas PM2 procesas (`-i 1`) ir patikrinamas `/api/health`.
+  - Sukurti izoliuoti skriptai `scripts/backup-data.sh` (sukuria nešiojamą JSON kopiją su nuotraukomis ir `.tar.gz` katalogo archyvą) ir `scripts/restore-data.sh` (validuoja kopiją laikiname kataloge, sukuria saugos archyvą `pre_restore_*.tar.gz` ir atkuria `school_database.json` bei `photos/`).
+  - `SelfHostView.tsx` ir `PROXMOX_DIEGIMAS.md` suderinti su `bun`, `server.ts`, `DATA_DIR`, vieno proceso reikalavimu bei aiškiai atskirtos `data/backups/` (be `photos/`) ir pilnos išorinės kopijos.
+- **Senų kopijų `organizationSettings` klaidos pataisa (`src/utils/organization.ts`, `src/utils/databaseValidation.ts`, `src/utils/dbOperations.ts`, `src/utils/storage.ts`, `src/utils/reportUtils.ts`, `src/utils/docxExport.ts`, `src/components/ReportsView.tsx`, `src/components/LabelsQRView.tsx`, `src/App.tsx`):**
+  - Importuojant seną JSON kopiją be `organizationSettings`, rekvizitai nebepriskiriami automatiškai kaip patvirtinti (`organizationSettings` lieka `undefined`, pateikiamas įspėjimas `warnings[]`).
+  - Kol įstaigos rekvizitai nepatvirtinti, oficialių ataskaitų ir etikečių `.docx` / spausdinimo / CSV eksportai blokuojami su aiškiu įspėjimu ir galimybe įstaigai patiems patvirtinti rekvizitus skiltyje „Ataskaitos ir aktai“; istorinės užbaigtos sesijos ir patvirtinti aktai nekeičiami.
+
 ### Patikrų rezultatai
-- `npx tsx --test tests/stage1-storage.test.ts tests/stage2-editing-relations.test.ts tests/stage3-writeoff-restore.test.ts tests/stage3-queue-and-history.test.ts tests/stage4-audit-qr.test.ts tests/stage5-reports-summaries.test.ts tests/stage6-defects-labels-users.test.ts` – **45/45 testai sėkmingi** (įskaitant 11 naujų 6 etapo testų).
-- `npm run build` (`compile_applet`) ir `npm run lint` (`tsc --noEmit`) – sėkmingi be klaidų.
+- `npx tsx --test tests/stage*.test.ts` (`tests/stage1-storage.test.ts` .. `tests/stage7-deployment-e2e.test.ts`) – **50/50 testų sėkmingi** (įskaitant 5 izoliuotus 7 etapo testus: produkcinį `server.ts` subprocesą su perkrovimu, sugadintą/naujesnės schemos JSON su HTTP `503`, `backup-data.sh`/`restore-data.sh` bei `/api/database/backup` atkūrimą su nuotraukomis baitu į baitą, senos kopijos `organizationSettings` blokavimą ir 1–6 etapų E2E ciklą).
+- `bun install --frozen-lockfile --dry-run`, `bash -n update.sh scripts/backup-data.sh scripts/restore-data.sh`, `npm run build` (`vite build`) ir `npm run lint` (`tsc --noEmit`) – sėkmingi.
+
+### Kas šioje aplinkoje NEPATIKRINTA (aiškios ribos)
+- **Docker vaizdo kompiliacija ir konteinerio perkūrimas (`docker compose build` / `up`):** šioje aplinkoje nėra įdiegto `docker` CLI / Docker demono.
+- **PM2 ir realus Proxmox LXC serveris:** `pm2` nėra įdiegtas šioje aplinkoje; produkcinis Proxmox LXC serveris sąmoningai neliestas.
+- **Mobiliojo telefono kamera ir spausdintuvas Brother PT-E920BT:** telefono kameros praktinis bandymas atidėtas; fizinio Brother PT-E920BT spausdintuvo nėra (suderinamumas nepatvirtintas), gyvas naršyklės A4 spausdinimo vaizdas netikrintas.
 
 ---
 
 ## Likę etapai
 
-- 7 – diegimas ir galutinė patikra
+- Visi 1–7 planiniai programavimo etapai baigti; laukiama naudotojo sprendimo dėl produkcinio diegimo Proxmox aplinkoje ir praktinių įrenginių (kameros / spausdintuvo) patikros.

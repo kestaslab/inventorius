@@ -159,8 +159,7 @@ export const SelfHostView: React.FC<SelfHostViewProps> = ({
     }
   };
 
-  const dockerComposeCode = `version: '3.8'
-
+  const dockerComposeCode = `# Svarbu: paleiskite tik 1 procesą (replicas: 1), nes JSON DB užraktas veikia atmintyje.
 services:
   mokyklos-inventorius:
     build: .
@@ -171,59 +170,66 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
+      - DATA_DIR=/app/data
     volumes:
-      # Proxmox LXC mount: duomenų bazės išsaugojimas
+      # Nuolatinė DB (school_database.json), nuotraukų (photos/) ir automatinių kopijų (backups/) saugykla
       - ./data:/app/data
+    deploy:
+      replicas: 1
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 10s
-      retries: 3`;
+      retries: 3
+      start_period: 15s`;
 
-  const proxmoxDebianCommands = `# 1. Paleiskite Proxmox Container 107 (Inventorius) ir atidarykite konsolę (>_ Console arba pct enter 107)
+  const proxmoxDebianCommands = `# Išsami instrukcija taip pat pateikta faile PROXMOX_DIEGIMAS.md
+# 1. Paleiskite Proxmox Container 107 (Debian 12) ir atidarykite konsolę (pct enter 107)
 
-# 2. Įdiekite reikalingus paketus ir naujausią Node.js LTS (v22):
-apt update && apt install -y curl git
+# 2. Įdiekite pagrindinius paketus, Node.js 22 LTS ir Bun (pagal saugyklos bun.lock):
+apt update && apt install -y curl git tar unzip
 curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 apt install -y nodejs
+curl -fsSL https://bun.sh/install | bash
+ln -sf "$HOME/.bun/bin/bun" /usr/local/bin/bun
 
-# 3. Nuklonuokite inventoriaus projekto kodą iš GitHub į /opt/inventorius:
+# 3. Nuklonuokite projekto kodą į /opt/inventorius ir paruoškite duomenų katalogą:
 git clone <JUSU_GITHUB_REPO_URL> /opt/inventorius
 cd /opt/inventorius
+mkdir -p /opt/inventorius/data/photos /opt/inventorius/data/backups
 
-# 4. Įdiekite priklausomybes ir sukompiliuokite produkcijai:
-npm install
-npm run build
+# 4. Įdiekite priklausomybes pagal bun.lock ir sukompiliuokite produkcijai:
+bun install --frozen-lockfile
+bun run build
 
-# 5. Įdiekite PM2 procesų valdymo įrankį ir paleiskite servisą:
+# 5. Paleiskite VIENINTELĮ server.ts procesą per PM2 (NE npx serve, nes reikalingas /api/*):
 npm install -g pm2
-pm2 start "npx serve -s dist -l 3000" --name "inventorius"
+NODE_ENV=production PORT=3000 DATA_DIR=/opt/inventorius/data pm2 start bun --name "inventorius" -i 1 -- run start
 pm2 save
 pm2 startup
 
-# Sistema automatiškai veiks fone portu 3000 ir pasileis po bet kurio Proxmox perkrovimo!`;
+# 6. Patikrinkite serverio sveikatą ir API:
+curl -fsS http://127.0.0.1:3000/api/health`;
 
-  const cloudflareTunnelSnippet = `# 1. SVARBI PASTABA Cloudflare Tunnel nustatymams:
-# Nuotraukoje matoma, kad nustatyta https://192.168.1.91:3000.
-# Pakeiskite į HTTP (ne HTTPS), nes vietinis Node servisas veikia įprastu HTTP:
+  const cloudflareTunnelSnippet = `# 1. Cloudflare Tunnel nustatymai (autentifikavimo ir rolių nekeiskite):
+# Nurodykite vidinį HTTP taikinį (ne HTTPS), nes Node/Express serveris klausosi HTTP:
 # Type: HTTP
-# URL: 192.168.1.91:3000 (arba http://192.168.1.91:3000)
+# URL: http://127.0.0.1:3000 (arba http://<LXC-IP>:3000)
 
-# 2. Vieno paspaudimo atnaujinimo skriptas (update.sh) Proxmox konteineryje:
-cat << 'EOF' > /opt/inventorius/update.sh
-#!/bin/bash
-echo "=== Atnaujinama Tryškių Lazdynų Pelėdos gimnazijos inventoriaus sistema ==="
+# 2. Saugus atnaujinimas ir atsarginė kopija Proxmox LXC konteineryje:
+# Saugykloje jau paruošti skriptai:
+#   ./scripts/backup-data.sh   – pilna nešiojama JSON kopija + tar.gz (DB ir photos/)
+#   ./scripts/restore-data.sh  – patikra laikiname kataloge ir saugus atkūrimas
+#   ./update.sh                – git status patikra, kopija, git pull --ff-only,
+#                                bun install --frozen-lockfile, bun run build,
+#                                PM2 perkrovimas (-i 1) ir /api/health patikra
+
 cd /opt/inventorius
-git pull
-npm install
-npm run build
-pm2 restart inventorius
-echo "=== Atnaujinimas sėkmingai baigtas! ==="
-EOF
-chmod +x /opt/inventorius/update.sh
+chmod +x update.sh scripts/*.sh
+./update.sh
 
-# Kaskart padarius pakeitimus GitHub repozitorijoje, konteineryje pakaks paleisti:
-/opt/inventorius/update.sh`;
+# Rankiniam pilnam archyvui prieš didelius pakeitimus:
+./scripts/backup-data.sh ./data ./backups_archive http://127.0.0.1:3000`;
 
   return (
     <div className="space-y-6">
@@ -387,10 +393,10 @@ chmod +x /opt/inventorius/update.sh
               <div className="p-3 rounded-lg text-xs bg-amber-50 text-amber-950 border border-amber-300 space-y-1.5">
                 <div className="font-bold flex items-center gap-1.5 text-amber-900">
                   <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                  <span>Aptikti senos kopijos nurašymo aktų ir daiktų neatitikimai ({restoreWarnings.length}):</span>
+                  <span>Senos kopijos suderinamumo ir duomenų pastabos ({restoreWarnings.length}):</span>
                 </div>
                 <p className="text-[11px] text-amber-800">
-                  Istoriniai duomenys nebuvo išgalvoti ar tyliai pakeisti. Galite juos saugiai peržiūrėti ir sutvarkyti skiltyje „Inventoriaus sąrašas“ arba „Ataskaitos ir aktai“.
+                  Istoriniai duomenys ir nepatvirtinti įstaigos rekvizitai nebuvo išgalvoti ar tyliai perrašyti. Peržiūrėkite sąrašą ir, jei reikia, patvirtinkite įstaigos rekvizitus skiltyje „Ataskaitos ir aktai“ arba sutvarkykite nurašymus „Inventoriaus sąraše“.
                 </p>
                 <ul className="list-disc pl-4 space-y-1 text-[11px] text-amber-900 max-h-40 overflow-y-auto">
                   {restoreWarnings.map((w, idx) => (
@@ -417,7 +423,7 @@ chmod +x /opt/inventorius/update.sh
               <div>
                 <strong className="text-slate-900 block">Kada rekomenduojama atsisiųsti kopiją:</strong>
                 <span className="text-[11px] text-slate-500">
-                  Prieš pradedant metinę inventorizaciją, patvirtinus didesnius turto nurašymus arba bent kartą per mėnesį profilaktiškai.
+                  Prieš pradedant metinę inventorizaciją, patvirtinus didesnius turto nurašymus, prieš programos atnaujinimą arba bent kartą per mėnesį profilaktiškai.
                 </span>
               </div>
             </div>
@@ -425,9 +431,9 @@ chmod +x /opt/inventorius/update.sh
             <div className="p-3 bg-slate-50 rounded-lg border border-slate-100 flex items-start gap-2.5">
               <HardDrive className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
               <div>
-                <strong className="text-slate-900 block">Kur saugoti atsarginį failą:</strong>
+                <strong className="text-slate-900 block">Kur saugoti atsarginį failą (išorinė kopija):</strong>
                 <span className="text-[11px] text-slate-500">
-                  Atsisiųstą <code>.json</code> failą išsaugokite savo tarnybiniame kompiuteryje arba gimnazijos „Google Drive“ aplanke.
+                  Serverio katalogas <code>data/backups/</code> saugo tik automatines JSON kopijas be <code>data/photos/</code> failų ir neapsaugo nuo serverio disko gedimo. Atsisiųstą pilną <code>.json</code> kopiją (su nuotraukomis) arba <code>.tar.gz</code> archyvą būtinai saugokite atskirame įrenginyje, Proxmox PBS ar NAS.
                 </span>
               </div>
             </div>
@@ -435,9 +441,9 @@ chmod +x /opt/inventorius/update.sh
             <div className="p-3 bg-slate-50 rounded-lg border border-slate-100 flex items-start gap-2.5">
               <ShieldCheck className="w-4 h-4 text-purple-600 shrink-0 mt-0.5" />
               <div>
-                <strong className="text-slate-900 block">Visiškas duomenų saugumas:</strong>
+                <strong className="text-slate-900 block">Pilnas atkūrimas su nuotraukomis:</strong>
                 <span className="text-[11px] text-slate-500">
-                  Kadangi sistema veikia gimnazijos Proxmox serveryje, atsarginė kopija yra nepriklausoma ir gali būti atkurta bet kada.
+                  Šiame puslapyje atsisiųstas <code>.json</code> failas per <code>/api/database/backup</code> įtraukia ir visas nuotraukas, todėl gali atkurti sistemą net tuščiame naujame serveryje.
                 </span>
               </div>
             </div>
@@ -488,10 +494,10 @@ chmod +x /opt/inventorius/update.sh
               <div className="bg-slate-50 border border-slate-200 p-3.5 rounded-lg space-y-1.5">
                 <div className="font-semibold text-slate-900 flex items-center gap-1.5">
                   <Database className="w-4 h-4 text-purple-600" />
-                  Zero-Maintenance priežiūra
+                  Zero-Maintenance saugykla (1 procesas)
                 </div>
                 <p className="text-slate-600 leading-relaxed">
-                  Jokių periodinių PostgreSQL/MySQL versijų atnaujinimų ar lūžimų. Viskas valdoma per paprastą vieno pulto JSON/SQLite failą.
+                  Jokių išorinių PostgreSQL/MySQL servisų – duomenys laikomi atomiškai atnaujinamame <code>school_database.json</code> faile ir <code>photos/</code> kataloge. Visada paleiskite tik <strong>1</strong> Node/Express procesą (<code>-i 1</code> arba <code>replicas: 1</code>).
                 </p>
               </div>
             </div>
@@ -553,7 +559,7 @@ chmod +x /opt/inventorius/update.sh
               <div className="flex items-center gap-2">
                 <Terminal className="w-4 h-4 text-slate-700" />
                 <h3 className="text-sm font-bold text-slate-900">
-                  Proxmox Debian 12 LXC diegimo komandos žingsnis po žingsnio
+                  Proxmox Debian 12 LXC diegimo komandos (bun + server.ts + PM2)
                 </h3>
               </div>
               <button
@@ -565,7 +571,7 @@ chmod +x /opt/inventorius/update.sh
               </button>
             </div>
             <p className="text-xs text-slate-600">
-              Galite nukopijuoti šias komandas ir tiesiogiai įvykdyti savo Proxmox Debian konteineryje:
+              Komandos atitinka saugyklos <code>bun.lock</code>, <code>server.ts</code> ir <code>PROXMOX_DIEGIMAS.md</code> instrukciją:
             </p>
             <pre className="bg-slate-900 text-slate-100 p-3.5 rounded-lg text-[11px] font-mono overflow-x-auto leading-relaxed border border-slate-800">
               {proxmoxDebianCommands}

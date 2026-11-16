@@ -8,6 +8,27 @@ export const DEFAULT_ORGANIZATION_SETTINGS: OrganizationSettings = {
   directorName: '',
 };
 
+export const UNCONFIRMED_ORGANIZATION_PLACEHOLDER: OrganizationSettings = {
+  name: 'Įstaigos rekvizitai nepatvirtinti',
+  code: 'Nenurodytas',
+  address: 'Nenurodytas',
+  directorTitle: 'Įstaigos vadovas',
+  directorName: '',
+};
+
+export function hasConfirmedOrganizationSettings(
+  settings?: Partial<OrganizationSettings> | null
+): settings is OrganizationSettings {
+  if (!settings) return false;
+  const name = settings.name?.trim() || '';
+  const code = settings.code?.trim() || '';
+  const address = settings.address?.trim() || '';
+  const directorTitle = settings.directorTitle?.trim() || '';
+  if (!name || !code || !address || !directorTitle) return false;
+  if (name === UNCONFIRMED_ORGANIZATION_PLACEHOLDER.name) return false;
+  return true;
+}
+
 export function cloneOrganizationSettings(
   settings?: Partial<OrganizationSettings> | null
 ): OrganizationSettings {
@@ -32,16 +53,26 @@ export function resolveOrganizationForDocument(
   isHistoricalCompletedDocument: boolean
 ): {
   organization: OrganizationSettings;
+  hasConfirmedOrganization: boolean;
   usesFallbackCurrentOrg: boolean;
 } {
-  if (documentSnapshot) {
+  if (hasConfirmedOrganizationSettings(documentSnapshot)) {
     return {
       organization: cloneOrganizationSettings(documentSnapshot),
+      hasConfirmedOrganization: true,
       usesFallbackCurrentOrg: false,
     };
   }
+  if (hasConfirmedOrganizationSettings(currentSettings)) {
+    return {
+      organization: cloneOrganizationSettings(currentSettings),
+      hasConfirmedOrganization: true,
+      usesFallbackCurrentOrg: isHistoricalCompletedDocument,
+    };
+  }
   return {
-    organization: cloneOrganizationSettings(currentSettings),
-    usesFallbackCurrentOrg: isHistoricalCompletedDocument,
+    organization: { ...UNCONFIRMED_ORGANIZATION_PLACEHOLDER },
+    hasConfirmedOrganization: false,
+    usesFallbackCurrentOrg: false,
   };
 }

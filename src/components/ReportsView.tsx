@@ -26,7 +26,11 @@ import { formatMoneyFixed } from '../utils/accountingUtils';
 import { EffectiveAuditItemState } from '../utils/auditUtils';
 import { getCalendarDatePart, getCurrentYearVilnius, getTodayVilniusDate } from '../utils/dateUtils';
 import { generateReportDocxBlob, getReportDocxFilename } from '../utils/docxExport';
-import { cloneOrganizationSettings } from '../utils/organization';
+import {
+  DEFAULT_ORGANIZATION_SETTINGS,
+  cloneOrganizationSettings,
+  hasConfirmedOrganizationSettings,
+} from '../utils/organization';
 import {
   AUDIT_STATE_LABELS,
   RegistryLifecycleScope,
@@ -82,14 +86,22 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   >(auditSessions.length > 0 ? 'audit_session_sheet' : 'inventory_sheet');
 
   // Organization settings panel
-  const [isOrgPanelOpen, setIsOrgPanelOpen] = useState(false);
+  const hasCurrentConfirmedOrg = hasConfirmedOrganizationSettings(organizationSettings);
+  const [isOrgPanelOpen, setIsOrgPanelOpen] = useState(() => !hasCurrentConfirmedOrg);
   const [orgForm, setOrgForm] = useState<OrganizationSettings>(() =>
-    cloneOrganizationSettings(organizationSettings)
+    hasCurrentConfirmedOrg
+      ? cloneOrganizationSettings(organizationSettings)
+      : { name: '', code: '', address: '', directorTitle: '', directorName: '' }
   );
   const [orgSaveNotice, setOrgSaveNotice] = useState<string | null>(null);
 
   useEffect(() => {
-    setOrgForm(cloneOrganizationSettings(organizationSettings));
+    if (hasConfirmedOrganizationSettings(organizationSettings)) {
+      setOrgForm(cloneOrganizationSettings(organizationSettings));
+    } else {
+      setOrgForm({ name: '', code: '', address: '', directorTitle: '', directorName: '' });
+      setIsOrgPanelOpen(true);
+    }
   }, [organizationSettings]);
 
   const canEditOrgSettings = currentUser.role === 'admin' || currentUser.role === 'manager';
@@ -266,21 +278,31 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     resolvedUserTarget,
   ]);
 
-  const isExportDisabled = resolvedReport.isEmpty || isExportingDocx;
+  const isOrgConfirmationRequired = !resolvedReport.hasConfirmedOrganization;
+  const isExportDisabled =
+    resolvedReport.isEmpty || isOrgConfirmationRequired || isExportingDocx;
 
   const handleSaveOrgSettings = (e: React.FormEvent) => {
     e.preventDefault();
     if (!canEditOrgSettings || !onUpdateOrganizationSettings) return;
+    if (
+      !orgForm.name.trim() ||
+      !orgForm.code.trim() ||
+      !orgForm.address.trim() ||
+      !orgForm.directorTitle.trim()
+    ) {
+      return;
+    }
     const cleaned = cloneOrganizationSettings(orgForm);
     onUpdateOrganizationSettings(cleaned);
     setOrgSaveNotice(
-      'Įstaigos rekvizitai atnaujinti. Užbaigti apyrašai ir patvirtinti aktai išsaugo savo istorinius rekvizitus.'
+      'Įstaigos rekvizitai patvirtinti ir išsaugoti. Užbaigti apyrašai ir patvirtinti aktai išsaugo savo istorinius rekvizitus.'
     );
     setTimeout(() => setOrgSaveNotice(null), 5000);
   };
 
   const handleDownloadWordDoc = async () => {
-    if (resolvedReport.isEmpty) return;
+    if (resolvedReport.isEmpty || isOrgConfirmationRequired) return;
     setExportError(null);
     setIsExportingDocx(true);
     try {
@@ -301,7 +323,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   };
 
   const handleDownloadCsv = () => {
-    if (resolvedReport.isEmpty) return;
+    if (resolvedReport.isEmpty || isOrgConfirmationRequired) return;
     setExportError(null);
     const { filename, content } = buildReportCsv(resolvedReport);
     const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
@@ -314,7 +336,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   };
 
   const handlePrintA4 = () => {
-    if (resolvedReport.isEmpty) return;
+    if (resolvedReport.isEmpty || isOrgConfirmationRequired) return;
     window.print();
   };
 
@@ -380,8 +402,12 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
             <button
               type="button"
               onClick={handlePrintA4}
-              disabled={resolvedReport.isEmpty}
-              title="Spausdinti šiuo metu matomą A4 dokumentą"
+              disabled={resolvedReport.isEmpty || isOrgConfirmationRequired}
+              title={
+                isOrgConfirmationRequired
+                  ? 'Pirmiausia patvirtinkite įstaigos rekvizitus'
+                  : 'Spausdinti šiuo metu matomą A4 dokumentą'
+              }
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-800 bg-white border border-slate-300 rounded-md hover:bg-slate-50 disabled:opacity-45 disabled:pointer-events-none transition-colors cursor-pointer shadow-xs"
             >
               <Printer className="w-3.5 h-3.5 text-slate-700" />
@@ -391,7 +417,11 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
               type="button"
               onClick={handleDownloadCsv}
               disabled={isExportDisabled}
-              title="Atsisiųsti tikslią šios ataskaitos lentelę CSV (Excel) formatu"
+              title={
+                isOrgConfirmationRequired
+                  ? 'Pirmiausia patvirtinkite įstaigos rekvizitus'
+                  : 'Atsisiųsti tikslią šios ataskaitos lentelę CSV (Excel) formatu'
+              }
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-800 bg-white border border-slate-300 rounded-md hover:bg-slate-50 disabled:opacity-45 disabled:pointer-events-none transition-colors cursor-pointer shadow-xs"
             >
               <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
@@ -401,7 +431,11 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
               type="button"
               onClick={() => void handleDownloadWordDoc()}
               disabled={isExportDisabled}
-              title="Atsisiųsti tikrą Microsoft Word (OOXML .docx) dokumentą"
+              title={
+                isOrgConfirmationRequired
+                  ? 'Pirmiausia patvirtinkite įstaigos rekvizitus'
+                  : 'Atsisiųsti tikrą Microsoft Word (OOXML .docx) dokumentą'
+              }
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-45 disabled:pointer-events-none rounded-md transition-colors shadow-xs cursor-pointer"
             >
               <FileText className="w-3.5 h-3.5" />
@@ -409,6 +443,26 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
             </button>
           </div>
         </div>
+
+        {isOrgConfirmationRequired && (
+          <div className="p-3 rounded-lg bg-amber-50 border border-amber-300 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+              <div>
+                <strong>Reikalingas įstaigos rekvizitų patvirtinimas:</strong> šioje duomenų bazėje (ar senojoje kopijoje) nėra patvirtintų įstaigos rekvizitų. Kad neuždėtume klaidingos mokyklos duomenų, oficialių dokumentų spausdinimas ir eksportas išjungti, kol rekvizitai nebus patvirtinti.
+              </div>
+            </div>
+            {canEditOrgSettings && onUpdateOrganizationSettings && !isOrgPanelOpen && (
+              <button
+                type="button"
+                onClick={() => setIsOrgPanelOpen(true)}
+                className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white font-semibold rounded cursor-pointer shrink-0"
+              >
+                Įvesti ir patvirtinti rekvizitus
+              </button>
+            )}
+          </div>
+        )}
 
         {exportError && (
           <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800 font-medium">
@@ -484,12 +538,21 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                   className="w-full rounded px-2.5 py-1.5 border border-slate-300 text-xs"
                 />
               </div>
-              <div className="flex items-end">
+              <div className="flex flex-wrap items-end gap-2">
+                {!hasCurrentConfirmedOrg && (
+                  <button
+                    type="button"
+                    onClick={() => setOrgForm(cloneOrganizationSettings(DEFAULT_ORGANIZATION_SETTINGS))}
+                    className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-800 font-semibold rounded-md cursor-pointer"
+                  >
+                    Užpildyti gimnazijos šabloną
+                  </button>
+                )}
                 <button
                   type="submit"
                   className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-md cursor-pointer"
                 >
-                  Išsaugoti rekvizitus
+                  Patvirtinti ir išsaugoti rekvizitus
                 </button>
               </div>
             </div>

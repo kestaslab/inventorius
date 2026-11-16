@@ -1296,7 +1296,9 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
       }
 
       const approvedDateClean = op.approvedDate.trim();
-      const orgSnap = cloneOrganizationSettings(db.organizationSettings);
+      const orgSnap = db.organizationSettings
+        ? cloneOrganizationSettings(db.organizationSettings)
+        : undefined;
       const writeOffActs = db.writeOffActs.map((a) =>
         a.id === op.actId
           ? {
@@ -1305,7 +1307,7 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
               status: 'approved' as const,
               actYear: op.approvalYear,
               approvedDate: approvedDateClean,
-              organizationSnapshot: orgSnap,
+              ...(orgSnap ? { organizationSnapshot: orgSnap } : {}),
               ...(op.approvedByUserId ? { approvedByUserId: op.approvedByUserId } : {}),
               ...(op.approvedByUserName ? { approvedByUserName: op.approvedByUserName } : {}),
             }
@@ -2674,7 +2676,9 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
         }
       }
 
-      const sessionOrgSnapshot = cloneOrganizationSettings(db.organizationSettings);
+      const sessionOrgSnapshot = db.organizationSettings
+        ? cloneOrganizationSettings(db.organizationSettings)
+        : undefined;
       const auditSessions = db.auditSessions.map((s) =>
         s.id === op.sessionId
           ? {
@@ -2685,7 +2689,7 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
               ...(op.completedByUserName ? { completedByUserName: op.completedByUserName } : {}),
               snapshotItems: frozenSnapshot,
               missingItemIds: Array.from(finalMissingIds),
-              organizationSnapshot: sessionOrgSnapshot,
+              ...(sessionOrgSnapshot ? { organizationSnapshot: sessionOrgSnapshot } : {}),
               completionSummary: {
                 totalExpected: frozenSnapshot.length,
                 foundInPlaceCount,

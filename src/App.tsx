@@ -100,8 +100,8 @@ export default function App() {
   const [auditSessions, setAuditSessions] = useState<AuditSession[]>(() => StorageService.getAuditSessions());
   const [activeUserId, setActiveUserId] = useState<string | null>(() => StorageService.getActiveUserId());
   const [authSettings, setAuthSettings] = useState<AuthSettings>(() => StorageService.getAuthSettings());
-  const [organizationSettings, setOrganizationSettings] = useState<OrganizationSettings>(() =>
-    StorageService.getOrganizationSettings()
+  const [organizationSettings, setOrganizationSettings] = useState<OrganizationSettings | undefined>(
+    () => StorageService.getOrganizationSettings()
   );
   const [syncState, setSyncState] = useState<SyncState>(() => StorageService.getSyncState());
   const [actionError, setActionError] = useState<string | null>(null);
@@ -170,9 +170,7 @@ export default function App() {
       if (db.authSettings) {
         setAuthSettings(db.authSettings);
       }
-      if (db.organizationSettings) {
-        setOrganizationSettings(db.organizationSettings);
-      }
+      setOrganizationSettings(db.organizationSettings);
     });
 
     StorageService.loadFromServer().then((hasServerData) => {

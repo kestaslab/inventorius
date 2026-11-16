@@ -291,6 +291,8 @@ function persistSnapshotToLocalCache(db: AppDatabase, isServerAuthoritative: boo
     results.push(
       safeSetLocalStorage(STORAGE_KEYS.ORG_SETTINGS, JSON.stringify(db.organizationSettings))
     );
+  } else {
+    safeRemoveLocalStorage(STORAGE_KEYS.ORG_SETTINGS);
   }
 
   if (results.some((r) => !r.ok)) {
@@ -796,16 +798,18 @@ export const StorageService = {
     }
   },
 
-  getOrganizationSettings(): OrganizationSettings {
-    if (memoryDb?.organizationSettings) {
-      return cloneOrganizationSettings(memoryDb.organizationSettings);
+  getOrganizationSettings(): OrganizationSettings | undefined {
+    if (memoryDb) {
+      return memoryDb.organizationSettings
+        ? cloneOrganizationSettings(memoryDb.organizationSettings)
+        : undefined;
     }
     const raw = safeGetLocalStorage(STORAGE_KEYS.ORG_SETTINGS);
-    if (!raw) return cloneOrganizationSettings(DEFAULT_ORGANIZATION_SETTINGS);
+    if (!raw) return undefined;
     try {
       return cloneOrganizationSettings(JSON.parse(raw));
     } catch {
-      return cloneOrganizationSettings(DEFAULT_ORGANIZATION_SETTINGS);
+      return undefined;
     }
   },
 
