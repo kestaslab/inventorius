@@ -21,9 +21,19 @@ const MAX_PROCESSED_OPS = 200;
 const MIME_TO_EXT: Record<string, string> = {
   jpeg: 'jpg',
   jpg: 'jpg',
+  pjpeg: 'jpg',
   png: 'png',
   webp: 'webp',
   gif: 'gif',
+  'svg+xml': 'svg',
+  svg: 'svg',
+  avif: 'avif',
+  bmp: 'bmp',
+  'x-ms-bmp': 'bmp',
+  'x-icon': 'ico',
+  'vnd.microsoft.icon': 'ico',
+  heic: 'heic',
+  heif: 'heif',
 };
 
 const EXT_TO_MIME: Record<string, string> = {
@@ -32,6 +42,12 @@ const EXT_TO_MIME: Record<string, string> = {
   png: 'image/png',
   webp: 'image/webp',
   gif: 'image/gif',
+  svg: 'image/svg+xml',
+  avif: 'image/avif',
+  bmp: 'image/bmp',
+  ico: 'image/x-icon',
+  heic: 'image/heic',
+  heif: 'image/heif',
 };
 
 export interface DatabaseApiOptions {
@@ -127,19 +143,52 @@ export function createDatabaseApiRouter(options: DatabaseApiOptions) {
     dataUrl: string,
     preferredFilename?: string
   ): { ok: true; url: string } | { ok: false; statusCode: number; error: string } {
-    const match = /^data:image\/(jpeg|jpg|png|webp|gif);base64,([A-Za-z0-9+/=\s]+)$/i.exec(dataUrl);
-    if (!match) {
+    const trimmedUrl = dataUrl.trim();
+    const b64Match = /^data:image\/([a-z0-9.+-]+)(?:;[^,;]*)*;base64,([A-Za-z0-9+/=_\-\s]+)$/i.exec(
+      trimmedUrl
+    );
+    const svgRawMatch = !b64Match
+      ? /^data:image\/svg\+xml(?:;[^,]*)*,([\s\S]+)$/i.exec(trimmedUrl)
+      : null;
+
+    let mimeSubtype: string;
+    let buffer: Buffer;
+
+    if (b64Match) {
+      mimeSubtype = b64Match[1].toLowerCase();
+      if (!MIME_TO_EXT[mimeSubtype]) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: `Netinkamas nuotraukos formatas (image/${mimeSubtype}). Leidžiami JPEG, PNG, WEBP, GIF, SVG, AVIF arba BMP failai.`,
+        };
+      }
+      const base64Clean = b64Match[2]
+        .replace(/\s+/g, '')
+        .replace(/-/g, '+')
+        .replace(/_/g, '/');
+      buffer = Buffer.from(base64Clean, 'base64');
+    } else if (svgRawMatch) {
+      mimeSubtype = 'svg+xml';
+      const rawBody = svgRawMatch[1];
+      let decodedSvg = rawBody;
+      if (/%[0-9A-Fa-f]{2}/.test(rawBody)) {
+        try {
+          decodedSvg = decodeURIComponent(rawBody);
+        } catch {
+          decodedSvg = rawBody;
+        }
+      }
+      buffer = Buffer.from(decodedSvg, 'utf-8');
+    } else {
       return {
         ok: false,
         statusCode: 400,
-        error: 'Netinkamas nuotraukos formatas. Leidžiami JPEG, PNG, WEBP arba GIF failai.',
+        error: 'Netinkamas nuotraukos formatas. Leidžiami JPEG, PNG, WEBP, GIF arba SVG failai.',
       };
     }
 
-    const mimeSubtype = match[1].toLowerCase();
     const ext = MIME_TO_EXT[mimeSubtype] || 'jpg';
-    const base64Clean = match[2].replace(/\s+/g, '');
-    const buffer = Buffer.from(base64Clean, 'base64');
 
     if (buffer.length === 0) {
       return { ok: false, statusCode: 400, error: 'Nuotraukos failas tuščias.' };
@@ -170,7 +219,10 @@ export function createDatabaseApiRouter(options: DatabaseApiOptions) {
   }
 
   // Iškelia visas inline base64 nuotraukas iš duomenų bazės į data/photos/
-  function extractInlinePhotosFromDb(db: AppDatabase): {
+  function extractInlinePhotosFromDb(
+    db: AppDatabase,
+    opts: { lenientLegacy?: boolean } = {}
+  ): {
     ok: true;
     database: AppDatabase;
     extractedCount: number;
@@ -182,7 +234,13 @@ export function createDatabaseApiRouter(options: DatabaseApiOptions) {
       for (const [key, dataUrl] of Object.entries(db.photos)) {
         const preferred = key.startsWith('/api/photos/') ? path.basename(key) : key;
         const saved = saveDataUrlToDisk(dataUrl, preferred);
-        if (!saved.ok) return saved;
+        if (!saved.ok) {
+          if (opts.lenientLegacy) {
+            console.warn(`[Nuotraukų migracija] Praleista sugadinta nuotrauka „${key}“: ${saved.error}`);
+            continue;
+          }
+          return saved;
+        }
         extractedCount++;
       }
     }
@@ -194,10 +252,17 @@ export function createDatabaseApiRouter(options: DatabaseApiOptions) {
       if (item.photoUrl && item.photoUrl.startsWith('data:image/')) {
         const saved = saveDataUrlToDisk(item.photoUrl);
         if (!saved.ok) {
-          throw Object.assign(new Error(saved.error), { statusCode: saved.statusCode });
+          if (opts.lenientLegacy) {
+            console.warn(
+              `[Nuotraukų migracija] Nepavyko iškelti daikto [${item.inventoryNumber}] nuotraukos: ${saved.error}`
+            );
+          } else {
+            throw Object.assign(new Error(saved.error), { statusCode: saved.statusCode });
+          }
+        } else {
+          updatedItem = { ...updatedItem, photoUrl: saved.url };
+          extractedCount++;
         }
-        updatedItem = { ...updatedItem, photoUrl: saved.url };
-        extractedCount++;
       }
 
       if (updatedItem.defectReports && updatedItem.defectReports.length > 0) {
@@ -206,6 +271,12 @@ export function createDatabaseApiRouter(options: DatabaseApiOptions) {
           if (rep.photoUrl && rep.photoUrl.startsWith('data:image/')) {
             const saved = saveDataUrlToDisk(rep.photoUrl);
             if (!saved.ok) {
+              if (opts.lenientLegacy) {
+                console.warn(
+                  `[Nuotraukų migracija] Nepavyko iškelti gedimo (${rep.id}) nuotraukos: ${saved.error}`
+                );
+                return rep;
+              }
               throw Object.assign(new Error(saved.error), { statusCode: saved.statusCode });
             }
             reportsChanged = true;
@@ -335,7 +406,7 @@ export function createDatabaseApiRouter(options: DatabaseApiOptions) {
     }
 
     let db = validation.data;
-    const extracted = extractInlinePhotosFromDb(db);
+    const extracted = extractInlinePhotosFromDb(db, { lenientLegacy: true });
     if (!extracted.ok) {
       throw new Error(extracted.error);
     }
@@ -874,6 +945,10 @@ export function createDatabaseApiRouter(options: DatabaseApiOptions) {
     const ext = path.extname(safeName).replace('.', '').toLowerCase();
     const mime = EXT_TO_MIME[ext] || 'application/octet-stream';
     res.setHeader('Content-Type', mime);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    if (ext === 'svg') {
+      res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'");
+    }
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     return res.sendFile(resolved);
   });

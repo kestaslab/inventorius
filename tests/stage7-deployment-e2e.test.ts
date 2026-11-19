@@ -1073,3 +1073,49 @@ test('Stage 7.6: Legacy DB with deleted user on department.managerId, room.defau
   });
 });
 
+test('Stage 7.7: Legacy SVG, parameterized image data URLs, and malformed legacy photo strings do not crash /api/database or /api/database/backup', async () => {
+  await withExpressRouterServer(async (baseUrl, dataDir) => {
+    const svgDataUrl = 'data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20width%3D%2210%22%20height%3D%2210%22%3E%3C/svg%3E';
+    const paramPngDataUrl =
+      'data:image/png;charset=utf-8;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+    const dbWithPhotos = buildFixtureDb({
+      version: '1.0.0',
+      items: INITIAL_ITEMS.map((it, idx) => {
+        if (idx === 0) return { ...it, photoUrl: svgDataUrl };
+        if (idx === 1) return { ...it, photoUrl: paramPngDataUrl };
+        if (idx === 2) return { ...it, photoUrl: 'data:image/legacy-broken;not-valid' };
+        return it;
+      }),
+    });
+
+    fs.writeFileSync(path.join(dataDir, 'school_database.json'), JSON.stringify(dbWithPhotos, null, 2), 'utf-8');
+
+    const dbRes = await fetch(`${baseUrl}/api/database`);
+    assert.equal(dbRes.status, 200);
+    const dbJson = (await dbRes.json()) as AppDatabase;
+    assert.match(dbJson.items[0].photoUrl || '', /^\/api\/photos\/photo_.*\.svg$/);
+    assert.match(dbJson.items[1].photoUrl || '', /^\/api\/photos\/photo_.*\.png$/);
+    assert.equal(dbJson.items[2].photoUrl, 'data:image/legacy-broken;not-valid');
+
+    // Extracted SVG is servable over HTTP with nosniff + CSP
+    const svgRes = await fetch(`${baseUrl}${dbJson.items[0].photoUrl}`);
+    assert.equal(svgRes.status, 200);
+    assert.match(svgRes.headers.get('content-type') || '', /image\/svg\+xml/i);
+    assert.equal(svgRes.headers.get('x-content-type-options'), 'nosniff');
+
+    // /api/database/backup returns 200 OK and /api/health reports migratedPending: false
+    const bkpRes = await fetch(`${baseUrl}/api/database/backup`);
+    assert.equal(bkpRes.status, 200);
+    const bkpJson = (await bkpRes.json()) as AppDatabase;
+    assert.ok(bkpJson.photos && Object.keys(bkpJson.photos).length >= 2);
+
+    const healthRes = await fetch(`${baseUrl}/api/health`);
+    assert.equal(healthRes.status, 200);
+    const healthJson = (await healthRes.json()) as any;
+    assert.equal(healthJson.schemaVersion, CURRENT_DB_VERSION);
+    assert.equal(healthJson.migratedPending, false);
+  });
+});
+
+

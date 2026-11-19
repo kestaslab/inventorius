@@ -6,9 +6,19 @@ import { AppDatabase, validateAndMigrateDatabase } from '../src/utils/databaseVa
 const MIME_TO_EXT: Record<string, string> = {
   jpeg: 'jpg',
   jpg: 'jpg',
+  pjpeg: 'jpg',
   png: 'png',
   webp: 'webp',
   gif: 'gif',
+  'svg+xml': 'svg',
+  svg: 'svg',
+  avif: 'avif',
+  bmp: 'bmp',
+  'x-ms-bmp': 'bmp',
+  'x-icon': 'ico',
+  'vnd.microsoft.icon': 'ico',
+  heic: 'heic',
+  heif: 'heif',
 };
 
 function saveDataUrl(
@@ -16,12 +26,42 @@ function saveDataUrl(
   dataUrl: string,
   preferredFilename?: string
 ): string {
-  const match = /^data:image\/(jpeg|jpg|png|webp|gif);base64,([A-Za-z0-9+/=\s]+)$/i.exec(dataUrl);
-  if (!match) {
+  const trimmedUrl = dataUrl.trim();
+  const b64Match = /^data:image\/([a-z0-9.+-]+)(?:;[^,;]*)*;base64,([A-Za-z0-9+/=_\-\s]+)$/i.exec(
+    trimmedUrl
+  );
+  const svgRawMatch = !b64Match
+    ? /^data:image\/svg\+xml(?:;[^,]*)*,([\s\S]+)$/i.exec(trimmedUrl)
+    : null;
+
+  let mimeSubtype: string;
+  let buffer: Buffer;
+
+  if (b64Match) {
+    mimeSubtype = b64Match[1].toLowerCase();
+    if (!MIME_TO_EXT[mimeSubtype]) {
+      throw new Error(`Netinkamas nuotraukos formatas (image/${mimeSubtype}) atsarginėje kopijoje.`);
+    }
+    buffer = Buffer.from(
+      b64Match[2].replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/'),
+      'base64'
+    );
+  } else if (svgRawMatch) {
+    mimeSubtype = 'svg+xml';
+    let decodedSvg = svgRawMatch[1];
+    if (/%[0-9A-Fa-f]{2}/.test(decodedSvg)) {
+      try {
+        decodedSvg = decodeURIComponent(decodedSvg);
+      } catch {
+        // keep raw
+      }
+    }
+    buffer = Buffer.from(decodedSvg, 'utf-8');
+  } else {
     throw new Error('Netinkamas nuotraukos base64 formatas atsarginėje kopijoje.');
   }
-  const ext = MIME_TO_EXT[match[1].toLowerCase()] || 'jpg';
-  const buffer = Buffer.from(match[2].replace(/\s+/g, ''), 'base64');
+
+  const ext = MIME_TO_EXT[mimeSubtype] || 'jpg';
   if (buffer.length === 0) {
     throw new Error('Tuščias nuotraukos failas atsarginėje kopijoje.');
   }
