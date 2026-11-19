@@ -988,7 +988,7 @@ test('Stage 7.5: End-to-end Stages 1-6 workflow regression, multi-user 409 confl
   });
 });
 
-test('Stage 7.6: Legacy DB with deleted user on department.managerId / room.defaultResponsiblePersonId migrates cleanly with pre_migration backup and warning', async () => {
+test('Stage 7.6: Legacy DB with deleted user on department.managerId, room.defaultResponsiblePersonId, and item.responsibleUserId migrates cleanly with pre_migration backup and warning', async () => {
   await withExpressRouterServer(async (baseUrl, dataDir) => {
     const legacyDb = buildFixtureDb({
       version: '1.0.0',
@@ -998,6 +998,10 @@ test('Stage 7.6: Legacy DB with deleted user on department.managerId / room.defa
       rooms: INITIAL_ROOMS.map((r, idx) =>
         idx === 0 ? { ...r, defaultResponsiblePersonId: 'usr-deleted-99' } : r
       ),
+      items: INITIAL_ITEMS.map((it, idx) =>
+        idx === 0 ? { ...it, responsibleUserId: 'usr-2' } : it
+      ),
+      users: INITIAL_USERS.filter((u) => u.id !== 'usr-2'),
     });
 
     const dbFile = path.join(dataDir, 'school_database.json');
@@ -1015,6 +1019,7 @@ test('Stage 7.6: Legacy DB with deleted user on department.managerId / room.defa
     const cleanedDb = (await dbRes.json()) as AppDatabase;
     assert.equal(cleanedDb.departments[1].managerId, undefined);
     assert.equal(cleanedDb.rooms[0].defaultResponsiblePersonId, undefined);
+    assert.equal(cleanedDb.items[0].responsibleUserId, 'usr-2'); // preserved honestly without fabricating new owner
     assert.equal(cleanedDb.departments.length, legacyDb.departments.length);
     assert.equal(cleanedDb.items.length, legacyDb.items.length);
 
@@ -1037,7 +1042,7 @@ test('Stage 7.6: Legacy DB with deleted user on department.managerId / room.defa
       fs.rmSync(backupOutDir, { recursive: true, force: true });
     }
 
-    // 3. Explicit SAVE_DEPARTMENT with non-existent managerId is still rejected (400)
+    // 3. Explicit SAVE_DEPARTMENT and SAVE_ITEM with non-existent user IDs are still rejected (400)
     const badDeptSave = await fetch(`${baseUrl}/api/mutate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1051,6 +1056,20 @@ test('Stage 7.6: Legacy DB with deleted user on department.managerId / room.defa
       }),
     });
     assert.equal(badDeptSave.status, 400);
+
+    const badItemSave = await fetch(`${baseUrl}/api/mutate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        baseRevision: cleanedDb.revision || 1,
+        clientOpId: 'op-bad-item-owner',
+        operation: {
+          type: 'SAVE_ITEM',
+          item: { ...cleanedDb.items[0], responsibleUserId: 'usr-nonexistent' },
+        },
+      }),
+    });
+    assert.equal(badItemSave.status, 400);
   });
 });
 

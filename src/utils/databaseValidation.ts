@@ -574,33 +574,61 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
     if (!isOptionalString(u.roleTitle)) {
       return { ok: false, error: `${ctx} („${u.fullName}“): „roleTitle“ turi būti tekstas.` };
     }
+    let cleanedDeptId = typeof u.departmentId === 'string' && u.departmentId !== '' ? u.departmentId : undefined;
     if (u.departmentId !== undefined && u.departmentId !== '') {
-      if (typeof u.departmentId !== 'string' || !departmentIds.has(u.departmentId)) {
+      if (typeof u.departmentId !== 'string') {
         return {
           ok: false,
-          error: `${ctx} („${u.fullName}“): nurodytas neegzistuojantis skyrius „${String(u.departmentId)}“.`,
+          error: `${ctx} („${u.fullName}“): „departmentId“ turi būti tekstas.`,
         };
       }
+      if (!departmentIds.has(u.departmentId)) {
+        warnings.push(
+          `${ctx} („${u.fullName}“) turėjo nuorodą į nebeegzistuojantį skyrių („${u.departmentId}“). Ši pasenusi nuoroda išvalyta.`
+        );
+        cleanedDeptId = undefined;
+        migrated = true;
+      }
     }
+
+    let cleanedAssignedRoomId =
+      typeof u.assignedRoomId === 'string' && u.assignedRoomId !== '' ? u.assignedRoomId : undefined;
     if (u.assignedRoomId !== undefined && u.assignedRoomId !== '') {
-      if (typeof u.assignedRoomId !== 'string' || !roomIds.has(u.assignedRoomId)) {
+      if (typeof u.assignedRoomId !== 'string') {
         return {
           ok: false,
-          error: `${ctx} („${u.fullName}“): nurodytas neegzistuojantis kabinetas „${String(u.assignedRoomId)}“.`,
+          error: `${ctx} („${u.fullName}“): „assignedRoomId“ turi būti tekstas.`,
         };
       }
+      if (!roomIds.has(u.assignedRoomId)) {
+        warnings.push(
+          `${ctx} („${u.fullName}“) turėjo nuorodą į nebeegzistuojantį kabinetą („${u.assignedRoomId}“). Ši pasenusi nuoroda išvalyta.`
+        );
+        cleanedAssignedRoomId = undefined;
+        migrated = true;
+      }
     }
+
+    let cleanedAssignedRoomIds: string[] | undefined = undefined;
     if (u.assignedRoomIds !== undefined) {
       if (!isStringArray(u.assignedRoomIds)) {
         return { ok: false, error: `${ctx} („${u.fullName}“): „assignedRoomIds“ turi būti tekstų masyvas.` };
       }
+      const validRooms: string[] = [];
       for (const rId of u.assignedRoomIds) {
-        if (rId && !roomIds.has(rId)) {
-          return {
-            ok: false,
-            error: `${ctx} („${u.fullName}“): priskirtas neegzistuojantis kabinetas „${rId}“.`,
-          };
+        if (!rId) continue;
+        if (!roomIds.has(rId)) {
+          warnings.push(
+            `${ctx} („${u.fullName}“) turėjo priskirtą nebeegzistuojantį kabinetą („${rId}“). Ši pasenusi nuoroda išvalyta.`
+          );
+          migrated = true;
+        } else if (!validRooms.includes(rId)) {
+          validRooms.push(rId);
         }
+      }
+      cleanedAssignedRoomIds = validRooms;
+      if (!cleanedAssignedRoomId && validRooms.length > 0) {
+        cleanedAssignedRoomId = validRooms[0];
       }
     }
     if (
@@ -616,10 +644,24 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
     }
 
     userIds.add(u.id);
-    users.push({
+    const normalizedUser: User = {
       ...(u as unknown as User),
       roleTitle: typeof u.roleTitle === 'string' ? u.roleTitle : '',
-    });
+    };
+    if (cleanedDeptId) {
+      normalizedUser.departmentId = cleanedDeptId;
+    } else {
+      delete normalizedUser.departmentId;
+    }
+    if (cleanedAssignedRoomId) {
+      normalizedUser.assignedRoomId = cleanedAssignedRoomId;
+    } else {
+      delete normalizedUser.assignedRoomId;
+    }
+    if (cleanedAssignedRoomIds !== undefined) {
+      normalizedUser.assignedRoomIds = cleanedAssignedRoomIds;
+    }
+    users.push(normalizedUser);
   }
 
   // Tikriname skyrių ir kabinetų nebeegzistuojančias pasirenkamas nuorodas į naudotojus (senesnėse kopijose naudotojas galėjo būti pašalintas)
@@ -780,10 +822,9 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
       };
     }
     if (!userIds.has(it.responsibleUserId)) {
-      return {
-        ok: false,
-        error: `${ctx} ([${it.inventoryNumber}]): nurodytas neegzistuojantis atsakingas asmuo „${it.responsibleUserId}“.`,
-      };
+      warnings.push(
+        `Turtas [${it.inventoryNumber}] („${it.name}“) nurodo nebeegzistuojantį atsakingą asmenį („${it.responsibleUserId}“). Daiktas išsaugotas – redaguojant ar perkeliant priskirkite galiojantį atsakingą asmenį.`
+      );
     }
 
     if (
