@@ -21,16 +21,16 @@ CREATED_COUNT=0
 # 1. Jei serveris pasiekiamas ir DB inicijuota – paimame nuoseklią kopiją per serverio API užraktą (su nuotraukomis JSON viduje)
 if command -v curl >/dev/null 2>&1; then
   HEALTH_JSON="$(curl -fsS --max-time 5 "${SERVER_URL}/api/health" 2>/dev/null || true)"
-  if [ -n "$HEALTH_JSON" ] && echo "$HEALTH_JSON" | grep -q '"dbExists":true'; then
+  if [ -n "$HEALTH_JSON" ] && echo "$HEALTH_JSON" | grep -q '"status":"ok"' && echo "$HEALTH_JSON" | grep -q '"dbExists":true'; then
     PORTABLE_JSON="${BACKUP_DIR}/inventorius_portable_${TS}.json"
-    if curl -fsS --max-time 30 "${SERVER_URL}/api/database/backup" -o "${PORTABLE_JSON}.tmp"; then
-      npx --prefix "$ROOT_DIR" tsx "$ROOT_DIR/scripts/db-cli.ts" validate-json "${PORTABLE_JSON}.tmp" >/dev/null
+    if curl -fsS --max-time 30 "${SERVER_URL}/api/database/backup" -o "${PORTABLE_JSON}.tmp" \
+      && npx --prefix "$ROOT_DIR" tsx "$ROOT_DIR/scripts/db-cli.ts" validate-json "${PORTABLE_JSON}.tmp" >/dev/null 2>&1; then
       mv "${PORTABLE_JSON}.tmp" "${PORTABLE_JSON}"
       echo "[OK] Sukurta nešiojama JSON kopija su nuotraukomis: ${PORTABLE_JSON}"
       CREATED_COUNT=$((CREATED_COUNT + 1))
     else
       rm -f "${PORTABLE_JSON}.tmp"
-      echo "[ĮSPĖJIMAS] Nepavyko atsisiųsti /api/database/backup – tęsiama su failų sistemos archyvu." >&2
+      echo "[ĮSPĖJIMAS] Nepavyko gauti galiojančios /api/database/backup JSON kopijos – tęsiama su failų sistemos archyvu." >&2
     fi
   fi
 fi
