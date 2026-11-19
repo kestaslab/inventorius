@@ -987,3 +987,70 @@ test('Stage 7.5: End-to-end Stages 1-6 workflow regression, multi-user 409 confl
     }
   });
 });
+
+test('Stage 7.6: Legacy DB with deleted user on department.managerId / room.defaultResponsiblePersonId migrates cleanly with pre_migration backup and warning', async () => {
+  await withExpressRouterServer(async (baseUrl, dataDir) => {
+    const legacyDb = buildFixtureDb({
+      version: '1.0.0',
+      departments: INITIAL_DEPARTMENTS.map((d, idx) =>
+        idx === 1 ? { ...d, managerId: 'usr-5' } : d
+      ),
+      rooms: INITIAL_ROOMS.map((r, idx) =>
+        idx === 0 ? { ...r, defaultResponsiblePersonId: 'usr-deleted-99' } : r
+      ),
+    });
+
+    const dbFile = path.join(dataDir, 'school_database.json');
+    fs.writeFileSync(dbFile, JSON.stringify(legacyDb, null, 2), 'utf-8');
+
+    // 1. /api/health returns 200 OK (not 503!) and /api/database cleans dangling optional refs after saving pre_migration backup
+    const healthRes = await fetch(`${baseUrl}/api/health`);
+    assert.equal(healthRes.status, 200);
+    const healthJson = (await healthRes.json()) as any;
+    assert.equal(healthJson.status, 'ok');
+    assert.equal(healthJson.dbExists, true);
+
+    const dbRes = await fetch(`${baseUrl}/api/database`);
+    assert.equal(dbRes.status, 200);
+    const cleanedDb = (await dbRes.json()) as AppDatabase;
+    assert.equal(cleanedDb.departments[1].managerId, undefined);
+    assert.equal(cleanedDb.rooms[0].defaultResponsiblePersonId, undefined);
+    assert.equal(cleanedDb.departments.length, legacyDb.departments.length);
+    assert.equal(cleanedDb.items.length, legacyDb.items.length);
+
+    // pre_migration backup was created on disk
+    const backups = fs.readdirSync(path.join(dataDir, 'backups'));
+    assert.ok(backups.some((f) => f.includes('pre_migration')));
+
+    // 2. scripts/backup-data.sh also succeeds cleanly even before manual server startup
+    const backupOutDir = fs.mkdtempSync(path.join(os.tmpdir(), 'inv-stage7-dangling-bkp-'));
+    try {
+      fs.writeFileSync(dbFile, JSON.stringify(legacyDb, null, 2), 'utf-8');
+      const { stdout } = await execFileAsync(
+        'bash',
+        ['scripts/backup-data.sh', dataDir, backupOutDir, 'http://127.0.0.1:1'],
+        { cwd: process.cwd() }
+      );
+      assert.match(stdout, /Sukurtas pilnas duomenų archyvas/);
+      assert.ok(fs.readdirSync(backupOutDir).some((f) => f.endsWith('.tar.gz')));
+    } finally {
+      fs.rmSync(backupOutDir, { recursive: true, force: true });
+    }
+
+    // 3. Explicit SAVE_DEPARTMENT with non-existent managerId is still rejected (400)
+    const badDeptSave = await fetch(`${baseUrl}/api/mutate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        baseRevision: cleanedDb.revision || 1,
+        clientOpId: 'op-bad-dept-mgr',
+        operation: {
+          type: 'SAVE_DEPARTMENT',
+          department: { ...cleanedDb.departments[1], managerId: 'usr-nonexistent' },
+        },
+      }),
+    });
+    assert.equal(badDeptSave.status, 400);
+  });
+});
+

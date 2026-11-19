@@ -102,11 +102,12 @@ bun run build
 # 6. Nuolatinio duomenų katalogo paruošimas ir vieno PM2 proceso paleidimas
 mkdir -p /opt/inventorius/data/photos /opt/inventorius/data/backups
 npm install -g pm2
-NODE_ENV=production PORT=3000 DATA_DIR=/opt/inventorius/data pm2 start bun --name "inventorius" -i 1 -- run start
+NODE_ENV=production PORT=3000 DATA_DIR=/opt/inventorius/data pm2 start "$(command -v bun)" --interpreter none --name "inventorius" -i 1 -- run start
 pm2 save
 pm2 startup
 
-# 7. Patikrinimas
+# 7. Patikrinimas (palaukite 2 sek., kol serveris pasileis)
+sleep 2
 curl -fsS http://127.0.0.1:3000/api/health
 ```
 

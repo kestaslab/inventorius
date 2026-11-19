@@ -204,11 +204,12 @@ bun run build
 
 # 5. Paleiskite VIENINTELĮ server.ts procesą per PM2 (NE npx serve, nes reikalingas /api/*):
 npm install -g pm2
-NODE_ENV=production PORT=3000 DATA_DIR=/opt/inventorius/data pm2 start bun --name "inventorius" -i 1 -- run start
+NODE_ENV=production PORT=3000 DATA_DIR=/opt/inventorius/data pm2 start "$(command -v bun)" --interpreter none --name "inventorius" -i 1 -- run start
 pm2 save
 pm2 startup
 
-# 6. Patikrinkite serverio sveikatą ir API:
+# 6. Patikrinkite serverio sveikatą ir API (palaukus 2 sek., kol serveris pasileis):
+sleep 2
 curl -fsS http://127.0.0.1:3000/api/health`;
 
   const cloudflareTunnelSnippet = `# 1. Cloudflare Tunnel nustatymai (autentifikavimo ir rolių nekeiskite):

@@ -1594,6 +1594,14 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
       if (!op.department.name?.trim() || !op.department.code?.trim()) {
         return { ok: false, statusCode: 400, error: 'Skyriaus pavadinimas ir kodas yra privalomi.' };
       }
+      const trimmedManagerId = op.department.managerId?.trim() || undefined;
+      if (trimmedManagerId && !db.users.some((u) => u.id === trimmedManagerId)) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: `Nurodytas skyriaus vadovas („${trimmedManagerId}“) nerastas.`,
+        };
+      }
       const exists = db.departments.some((d) => d.id === op.department.id);
       const movements = exists
         ? backfillMovementSnapshots(db.movements, db.departments, db.rooms, db.users)
@@ -1602,6 +1610,7 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
         ...op.department,
         name: op.department.name.trim(),
         code: op.department.code.trim().toUpperCase(),
+        ...(trimmedManagerId ? { managerId: trimmedManagerId } : { managerId: undefined }),
       };
       const departments = exists
         ? db.departments.map((d) => (d.id === op.department.id ? normalizedDept : d))
@@ -1734,6 +1743,14 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
       if (!targetDept) {
         return { ok: false, statusCode: 400, error: 'Nurodytas kabineto skyrius nerastas.' };
       }
+      const trimmedDefaultUserId = op.room.defaultResponsiblePersonId?.trim() || undefined;
+      if (trimmedDefaultUserId && !db.users.some((u) => u.id === trimmedDefaultUserId)) {
+        return {
+          ok: false,
+          statusCode: 400,
+          error: `Nurodytas kabineto atsakingas asmuo („${trimmedDefaultUserId}“) nerastas.`,
+        };
+      }
 
       const existingRoom = db.rooms.find((r) => r.id === op.room.id);
       let movements = existingRoom
@@ -1775,6 +1792,9 @@ export function applyDbMutation(db: AppDatabase, op: DbMutation): MutationApplyR
         ...op.room,
         name: op.room.name.trim(),
         number: op.room.number?.trim() || undefined,
+        ...(trimmedDefaultUserId
+          ? { defaultResponsiblePersonId: trimmedDefaultUserId }
+          : { defaultResponsiblePersonId: undefined }),
       };
       const rooms = existingRoom
         ? db.rooms.map((r) => (r.id === op.room.id ? normalizedRoom : r))

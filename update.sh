@@ -63,8 +63,9 @@ if ! command -v pm2 >/dev/null 2>&1; then
   exit 1
 fi
 
+BUN_BIN="$(command -v bun)"
 pm2 delete inventorius >/dev/null 2>&1 || true
-NODE_ENV=production PORT="$PORT" DATA_DIR="$DATA_DIR" pm2 start bun --name "inventorius" -i 1 -- run start
+NODE_ENV=production PORT="$PORT" DATA_DIR="$DATA_DIR" pm2 start "$BUN_BIN" --interpreter none --name "inventorius" -i 1 -- run start
 pm2 save
 
 echo "Tikrinamas serverio veikimas (/api/health)..."
@@ -79,7 +80,7 @@ done
 
 if [ "$HEALTH_OK" -ne 1 ]; then
   echo "[KLAIDA] Serveris po atnaujinimo neatsakė į /api/health!" >&2
-  echo "Patikrinkite žurnalus: pm2 logs inventorius --lines 50" >&2
+  pm2 logs inventorius --lines 40 --nostream >&2 || true
   echo "Rankiniam grąžinimui į ankstesnę būseną:" >&2
   echo "  git checkout ${PREV_COMMIT} && bun install --frozen-lockfile && bun run build" >&2
   echo "  ./scripts/restore-data.sh <atsarginės-kopijos-failas-iš-${BACKUP_DIR}> ${DATA_DIR}" >&2

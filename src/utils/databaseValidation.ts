@@ -622,21 +622,23 @@ export function validateAndMigrateDatabase(raw: unknown): ValidationResult {
     });
   }
 
-  // Tikriname skyrių ir kabinetų nuorodas į naudotojus
+  // Tikriname skyrių ir kabinetų nebeegzistuojančias pasirenkamas nuorodas į naudotojus (senesnėse kopijose naudotojas galėjo būti pašalintas)
   for (const dept of departments) {
     if (dept.managerId && !userIds.has(dept.managerId)) {
-      return {
-        ok: false,
-        error: `Skyrius „${dept.name}“ nurodo neegzistuojantį vadovą „${dept.managerId}“.`,
-      };
+      warnings.push(
+        `Skyrius „${dept.name}“ turėjo nuorodą į nebeegzistuojantį vadovą („${dept.managerId}“). Ši pasenusi nuoroda išvalyta, o skyrius ir turtas išsaugoti.`
+      );
+      delete dept.managerId;
+      migrated = true;
     }
   }
   for (const room of rooms) {
     if (room.defaultResponsiblePersonId && !userIds.has(room.defaultResponsiblePersonId)) {
-      return {
-        ok: false,
-        error: `Kabinetas „${room.name}“ nurodo neegzistuojantį atsakingą asmenį „${room.defaultResponsiblePersonId}“.`,
-      };
+      warnings.push(
+        `Kabinetas „${room.name}“ turėjo nuorodą į nebeegzistuojantį atsakingą asmenį („${room.defaultResponsiblePersonId}“). Ši pasenusi nuoroda išvalyta, o kabinetas ir turtas išsaugoti.`
+      );
+      delete room.defaultResponsiblePersonId;
+      migrated = true;
     }
   }
 
